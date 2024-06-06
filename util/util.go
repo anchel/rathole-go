@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 
@@ -54,10 +55,11 @@ func (ca *CliArgs) GetRunMode() (RUN_MODE, error) {
 }
 
 func GetCliArgs() (*CliArgs, error) {
-	isServer := flag.Bool("server", false, "--server run as a server")
-	isClient := flag.Bool("client", false, "--server run as a client")
+	isServer := flag.Bool("server", false, "-server run as a server")
+	isClient := flag.Bool("client", false, "-client run as a client")
 	flag.Parse()
 	args := flag.Args()
+	fmt.Println("args", args)
 	if len(args) <= 0 {
 		return nil, errors.New("未指定配置文件")
 	}
@@ -96,4 +98,30 @@ func ResponseWriteWithBuffered(src *http.Response, dst io.Writer) (err error) {
 
 	err = src.Write(writer)
 	return
+}
+
+func CopyTcpConnection(dst net.Conn, src net.Conn) error {
+	chan_remote_to_local := make(chan error)
+	chan_local_to_remote := make(chan error)
+
+	go func() {
+		written, err := io.Copy(dst, src)
+		fmt.Println("datachannel remote forward to local", written, err)
+		chan_remote_to_local <- err
+	}()
+
+	go func() {
+		written, err := io.Copy(src, dst)
+		fmt.Println("datachannel local forward to remote", written, err)
+		chan_local_to_remote <- err
+	}()
+
+	var err error
+	select {
+	case err1 := <-chan_remote_to_local:
+		err = err1
+	case err2 := <-chan_local_to_remote:
+		err = err2
+	}
+	return err
 }

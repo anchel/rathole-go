@@ -58,13 +58,14 @@ func (s *Server) acceptLoop() {
 		fmt.Println("server listen fail", err)
 		return
 	}
-
+	fmt.Println("server starting listen")
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			fmt.Println("server accept fail", err)
 			break
 		}
+		fmt.Println("server accept connection")
 		go serveConnection(s, conn)
 	}
 
@@ -100,6 +101,7 @@ func do_control_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
 	service, ok = s.services[Digest(digest)]
 	s.mu.Unlock()
 	if !ok {
+		fmt.Println("server can not find service", digest)
 		resp := &http.Response{
 			Status:     "404 not found",
 			StatusCode: http.StatusNotFound,
@@ -131,16 +133,36 @@ func do_control_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
 		return
 	}
 	if req.URL.Path != "/control/auth" {
-		fmt.Println("recv hello auth fail", err)
+		fmt.Println("recv hello auth fail, path incorrect", err)
 		return
 	}
 	session_key := req.Header.Get("session_key")
 	d := util.CalSha256(service.token + nonce)
 	if session_key != d {
 		fmt.Println("recv hello auth invalid", d, session_key)
+		resp = &http.Response{
+			Status:     "401 Unauthorized",
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(map[string][]string),
+		}
+		err = util.ResponseWriteWithBuffered(resp, conn)
+		if err != nil {
+			fmt.Println("response /control/auth fail", err)
+		}
 		return
 	}
 	fmt.Println("recv hello auth success", session_key)
+
+	resp = &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Header:     make(map[string][]string),
+	}
+	err = util.ResponseWriteWithBuffered(resp, conn)
+	if err != nil {
+		fmt.Println("response /control/auth fail", err)
+		return
+	}
 
 	cc := NewControlChannel(session_key, s.config, service)
 
@@ -157,5 +179,26 @@ func do_control_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
 }
 
 func do_data_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
+	sessionKey := req.Header.Get("session_key")
 
+	var cc *ControlChannel
+	var ok bool
+	s.mu.Lock()
+	cc, ok = s.controlChannelMap[Digest(sessionKey)]
+	s.mu.Unlock()
+
+	if !ok {
+		resp := &http.Response{
+			Status:     "401 Unauthorized",
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(map[string][]string),
+		}
+		err := util.ResponseWriteWithBuffered(resp, conn)
+		if err != nil {
+			fmt.Println("response /data/hello fail", err)
+		}
+		return
+	}
+
+	cc.data_chan <- conn
 }

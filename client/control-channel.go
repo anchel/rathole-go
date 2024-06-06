@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"time"
@@ -79,7 +78,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		return
 	}
 	// fmt.Println("recv response /control/hello", resp)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		fmt.Println("recv response /control/hello not ok", resp.StatusCode)
 		return
 	}
@@ -110,7 +109,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		return
 	}
 	// fmt.Println("recv response /control/auth", resp)
-	if resp.StatusCode != 200 { // 404-服务不存在  403-token不正确
+	if resp.StatusCode != http.StatusOK { // 401-token不正确，拒绝访问
 		fmt.Println("recv response /control/auth not ok", resp.StatusCode)
 		return
 	}
@@ -200,7 +199,7 @@ func run_data_channel(args RunDataChannelArgs) error {
 		return err
 	}
 
-	if resp.StatusCode != 200 { // 403 - token invalid
+	if resp.StatusCode != 200 { // 401 - token invalid
 		fmt.Println("recv response /data/hello not ok", resp.StatusCode)
 		return errors.New("recv response /data/hello not ok")
 	}
@@ -228,23 +227,12 @@ func run_data_channel_for_tcp(conn net.Conn, localAddr string) {
 		fmt.Println("connect localaddr fail", err)
 		return
 	}
-	chan_remote_to_local := make(chan bool)
-	chan_local_to_remote := make(chan bool)
+	defer connection.Close()
 
-	go func() {
-		written, err := io.Copy(connection, conn)
-		fmt.Println("datachannel remote forward to local", written)
-		chan_remote_to_local <- err == nil
-	}()
-
-	go func() {
-		written, err := io.Copy(conn, connection)
-		fmt.Println("datachannel local forward to remote", written)
-		chan_local_to_remote <- err == nil
-	}()
-	ok1 := <-chan_remote_to_local
-	ok2 := <-chan_local_to_remote
-	fmt.Println("ok1, ok2", ok1, ok2)
+	err = util.CopyTcpConnection(connection, conn)
+	if err != nil {
+		fmt.Println("CopyTcpConnection error", err)
+	}
 }
 
 func run_data_channel_for_udp(conn net.Conn, localAddr string) {
