@@ -3,9 +3,9 @@ package client
 import (
 	"bufio"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"time"
@@ -202,52 +202,27 @@ func run_data_channel(args RunDataChannelArgs) error {
 	}
 	fmt.Println("send request /data/hello success")
 
-	// 接下来读两个字节，第一个字节：0-fail 1-ok；第二个字节：1-tcp 2-udp
-	// rconn := common.NewRewindConn(conn)
-	// rconn.SetBufferSize(128)
-
-	var buf [2]byte
-	n, err := io.ReadFull(conn, buf[:])
+	resp := common.ResponseDataHello{Ok: false, Typ: ""}
+	dec := gob.NewDecoder(conn)
+	err = dec.Decode(&resp)
 	if err != nil {
 		fmt.Println("recv response /data/hello fail", err)
 		return err
 	}
-	if n != len(buf) {
-		fmt.Println("recv response /data/hello byte count not correct", n, len(buf))
-		return fmt.Errorf("recv response /data/hello byte count not correct, %d, %d", n, len(buf))
-	}
-	if buf[0] != 1 {
-		fmt.Println("recv response /data/hello not ok", buf)
+
+	if !resp.Ok {
+		fmt.Println("recv response /data/hello not ok", resp)
 		return errors.New("recv response /data/hello not ok")
 	}
 
-	forwardType := "tcp"
-	if buf[1] == 2 {
-		forwardType = "udp"
-	}
-	// resp, err := http.ReadResponse(bufio.NewReader(rconn), nil)
-	// if err != nil {
-	// 	fmt.Println("recv response /data/hello fail", err)
-	// 	return err
-	// }
+	forwardType := resp.Typ
 
-	// if resp.StatusCode != 200 { // 401 - token invalid
-	// 	fmt.Println("recv response /data/hello not ok", resp.StatusCode)
-	// 	return errors.New("recv response /data/hello not ok")
-	// }
-
-	// forwardType := resp.Header.Get("type") // tcp udp
-
-	if forwardType != string(args.svcConfig.Type) {
+	if forwardType != args.svcConfig.Type {
 		fmt.Println("forward type not equal", forwardType, args.svcConfig.Type)
 		return errors.New("forward type not equal")
 	}
 
-	fmt.Println("recv response /data/hello ok", forwardType, buf)
-	// rconn.Rewind()
-	// rconn.StopBuffering()
-	// rconn.Discard(2)
-	// common.DiscardRewindConn(rconn, resp)
+	fmt.Println("recv response /data/hello ok", forwardType, resp)
 
 	if forwardType == "tcp" {
 		forward_data_channel_for_tcp(conn, args.svcConfig.LocalAddr)
@@ -269,21 +244,6 @@ func forward_data_channel_for_tcp(remoteConn *net.TCPConn, localAddr string) {
 	}
 	// defer clientConn.Close()
 	fmt.Println("forward_data_channel_for_tcp", remoteConn.LocalAddr())
-
-	// for {
-	// 	buf := make([]byte, 1024)
-	// 	n, e := remoteConn.Read(buf)
-	// 	fmt.Println("remoteConn Read", n, e)
-	// 	if e != nil {
-	// 		fmt.Println("remoteConn Read error", e)
-	// 		break
-	// 	}
-	// 	if n > 0 {
-	// 		fmt.Println("remoteConn Read", string(buf[:n]))
-	// 		wn, e := clientConn.Write(buf)
-	// 		fmt.Println("remoteConn Read and Write to client", wn, e)
-	// 	}
-	// }
 
 	err = common.CopyTcpConnection(clientConn, remoteConn)
 	if err != nil {

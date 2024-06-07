@@ -2,12 +2,13 @@ package server
 
 import (
 	"bufio"
+	"encoding/gob"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
 
-	util "github.com/anchel/rathole-go/common"
+	"github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
 )
 
@@ -42,7 +43,7 @@ func (s *Server) Run() {
 
 func (s *Server) init() {
 	for k, v := range s.config.Services {
-		digest := util.CalSha256(k)
+		digest := common.CalSha256(k)
 		s.services[Digest(digest)] = &Service{
 			svcName:   k,
 			svcType:   v.Type,
@@ -108,13 +109,13 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 			StatusCode: http.StatusNotFound,
 			Header:     make(map[string][]string),
 		}
-		err := util.ResponseWriteWithBuffered(resp, conn)
+		err := common.ResponseWriteWithBuffered(resp, conn)
 		if err != nil {
 			fmt.Println("response /control/hello fail", err)
 		}
 		return
 	}
-	nonce := util.RandStringRunes(16)
+	nonce := common.RandStringRunes(16)
 	fmt.Println("nonce", nonce)
 	resp := &http.Response{
 		Status:     "200 OK",
@@ -122,7 +123,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 		Header:     make(map[string][]string),
 	}
 	resp.Header.Set("nonce", nonce)
-	err := util.ResponseWriteWithBuffered(resp, conn)
+	err := common.ResponseWriteWithBuffered(resp, conn)
 	if err != nil {
 		fmt.Println("response /control/hello fail", err)
 		return
@@ -138,7 +139,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 		return
 	}
 	session_key := req.Header.Get("session_key")
-	d := util.CalSha256(service.token + nonce)
+	d := common.CalSha256(service.token + nonce)
 	if session_key != d {
 		fmt.Println("recv hello auth invalid", d, session_key)
 		resp = &http.Response{
@@ -146,7 +147,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 			StatusCode: http.StatusUnauthorized,
 			Header:     make(map[string][]string),
 		}
-		err = util.ResponseWriteWithBuffered(resp, conn)
+		err = common.ResponseWriteWithBuffered(resp, conn)
 		if err != nil {
 			fmt.Println("response /control/auth fail", err)
 		}
@@ -159,7 +160,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 		StatusCode: http.StatusOK,
 		Header:     make(map[string][]string),
 	}
-	err = util.ResponseWriteWithBuffered(resp, conn)
+	err = common.ResponseWriteWithBuffered(resp, conn)
 	if err != nil {
 		fmt.Println("response /control/auth fail", err)
 		return
@@ -188,44 +189,33 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 	cc, ok = s.controlChannelMap[Digest(sessionKey)]
 	s.mu.Unlock()
 
-	var respbuf [2]byte
+	resp := common.ResponseDataHello{Ok: false, Typ: ""}
+
 	if !ok {
 		fmt.Println("server sessionKey invalid", sessionKey)
-		// resp := &http.Response{
-		// 	Status:     "401 Unauthorized",
-		// 	StatusCode: http.StatusUnauthorized,
-		// 	Header:     make(map[string][]string),
-		// }
-		// err := util.ResponseWriteWithBuffered(resp, conn)
-		_, err := conn.Write(respbuf[:])
+		resp.Ok = false
+		dec := gob.NewEncoder(conn)
+		err := dec.Encode(&resp)
 		if err != nil {
 			fmt.Println("response /data/hello fail", err)
 		}
 		return
 	}
+
 	fmt.Println("server sessionKey ok", sessionKey)
 
-	// resp := &http.Response{
-	// 	Status:     "200 OK",
-	// 	StatusCode: http.StatusOK,
-	// 	Header:     make(map[string][]string),
-	// }
-	// resp.Header.Set("type", string(cc.service.svcType))
-	// err := util.ResponseWriteWithBuffered(resp, conn)
-	respbuf[0] = 1
-	respbuf[1] = 0 // 1-tcp 2-udp
-	if cc.service.svcType == config.TCP {
-		respbuf[1] = 1
-	} else if cc.service.svcType == config.UDP {
-		respbuf[1] = 2
-	}
-	_, err := conn.Write(respbuf[:])
+	resp.Ok = true
+	resp.Typ = cc.service.svcType
+
+	dec := gob.NewEncoder(conn)
+	err := dec.Encode(&resp)
+
 	if err != nil {
 		fmt.Println("response /data/hello fail", err)
 		return
 	}
 
-	fmt.Println("response /data/hello success", respbuf)
+	fmt.Println("response /data/hello success", resp)
 
 	cc.data_chan <- conn
 }

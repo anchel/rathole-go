@@ -46,7 +46,3 @@ func (c *Client) Run() {
 	// cancel()
 	// wg.Wait()
 }
-
-func (c *Client) handle_hot_reload() {
-	// todo
-}
