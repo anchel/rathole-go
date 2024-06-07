@@ -125,12 +125,18 @@ label_for:
 		case e1 := <-chan_remote_to_local:
 			err1 = e1
 			errCount++
+			if err1 == nil {
+				dst.Close()
+			}
 			if errCount >= 2 {
 				break label_for
 			}
 		case e2 := <-chan_local_to_remote:
 			err2 = e2
 			errCount++
+			if err2 == nil {
+				src.Close()
+			}
 			if errCount >= 2 {
 				break label_for
 			}
