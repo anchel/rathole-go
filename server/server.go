@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"sync"
 
+	util "github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
-	"github.com/anchel/rathole-go/util"
 )
 
 type Digest string
@@ -73,7 +73,7 @@ func (s *Server) acceptLoop() {
 }
 
 func serveConnection(s *Server, conn net.Conn) {
-	defer conn.Close()
+	// defer conn.Close()
 
 	req, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
@@ -187,18 +187,44 @@ func do_data_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
 	cc, ok = s.controlChannelMap[Digest(sessionKey)]
 	s.mu.Unlock()
 
+	var respbuf [2]byte
 	if !ok {
-		resp := &http.Response{
-			Status:     "401 Unauthorized",
-			StatusCode: http.StatusUnauthorized,
-			Header:     make(map[string][]string),
-		}
-		err := util.ResponseWriteWithBuffered(resp, conn)
+		fmt.Println("server sessionKey invalid", sessionKey)
+		// resp := &http.Response{
+		// 	Status:     "401 Unauthorized",
+		// 	StatusCode: http.StatusUnauthorized,
+		// 	Header:     make(map[string][]string),
+		// }
+		// err := util.ResponseWriteWithBuffered(resp, conn)
+		_, err := conn.Write(respbuf[:])
 		if err != nil {
 			fmt.Println("response /data/hello fail", err)
 		}
 		return
 	}
+	fmt.Println("server sessionKey ok", sessionKey)
+
+	// resp := &http.Response{
+	// 	Status:     "200 OK",
+	// 	StatusCode: http.StatusOK,
+	// 	Header:     make(map[string][]string),
+	// }
+	// resp.Header.Set("type", string(cc.service.svcType))
+	// err := util.ResponseWriteWithBuffered(resp, conn)
+	respbuf[0] = 1
+	respbuf[1] = 0 // 1-tcp 2-udp
+	if cc.service.svcType == config.TCP {
+		respbuf[1] = 1
+	} else if cc.service.svcType == config.UDP {
+		respbuf[1] = 2
+	}
+	_, err := conn.Write(respbuf[:])
+	if err != nil {
+		fmt.Println("response /data/hello fail", err)
+		return
+	}
+
+	fmt.Println("response /data/hello success", respbuf)
 
 	cc.data_chan <- conn
 }

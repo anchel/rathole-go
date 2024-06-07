@@ -6,10 +6,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/anchel/rathole-go/client"
+	util "github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
 	"github.com/anchel/rathole-go/pb/basic/basicpb"
 	"github.com/anchel/rathole-go/server"
-	"github.com/anchel/rathole-go/util"
 	"github.com/davecgh/go-spew/spew"
 	"google.golang.org/protobuf/proto"
 )

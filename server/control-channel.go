@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
-	"github.com/anchel/rathole-go/util"
 )
 
 type ControlChannel struct {
@@ -45,7 +45,7 @@ func (cc *ControlChannel) Run(conn net.Conn) {
 label_for:
 	for {
 		var errChan <-chan time.Time
-		timerHeartbeat := time.After(10 * time.Second)
+		timerHeartbeat := time.After(55 * time.Second)
 		if err != nil {
 			errChan = time.After(0)
 		}
@@ -61,7 +61,7 @@ label_for:
 					Header:     make(map[string][]string),
 				}
 				resp.Header.Set("cmd", "datachannel")
-				err = util.ResponseWriteWithBuffered(resp, conn)
+				err = common.ResponseWriteWithBuffered(resp, conn)
 				if err != nil {
 					fmt.Println("send /control/cmd datachannel fail", err)
 				}
@@ -74,7 +74,7 @@ label_for:
 					Header:     make(map[string][]string),
 				}
 				resp.Header.Set("cmd", "heartbeat")
-				err = util.ResponseWriteWithBuffered(resp, conn)
+				err = common.ResponseWriteWithBuffered(resp, conn)
 				if err != nil {
 					fmt.Println("send /control/cmd heartbeat fail", err)
 				}
@@ -100,7 +100,9 @@ func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool) {
 }
 
 func forward_tcp_connection(cc *ControlChannel, remoteConn net.Conn, data_req_chan chan<- bool) {
-	defer remoteConn.Close()
+	// defer remoteConn.Close()
+
+	fmt.Println("forward_tcp_connection", remoteConn.RemoteAddr())
 
 	// 发送命令，指示客户端主动连接服务器
 	go func() {
@@ -108,12 +110,32 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn net.Conn, data_req_ch
 	}()
 
 	clientConn := <-cc.data_chan
-	fmt.Println("成功取得客户的连接")
-	defer clientConn.Close()
+	fmt.Println("成功取得客户的连接", clientConn.RemoteAddr())
+	// defer clientConn.Close()
 
-	err := util.CopyTcpConnection(clientConn, remoteConn)
+	// go func() {
+	// 	for {
+	// 		buf := make([]byte, 1024)
+	// 		n, e := remoteConn.Read(buf)
+	// 		fmt.Println("remoteConn Read", n, e)
+	// 		if e != nil {
+	// 			fmt.Println("remoteConn Read error", e)
+	// 			break
+	// 		}
+	// 		if n > 0 {
+	// 			fmt.Println("remoteConn Read", string(buf[:n]))
+	// 			wn, e := clientConn.Write(buf)
+	// 			fmt.Println("remoteConn Read and Write to client", wn, e)
+	// 		}
+	// 	}
+
+	// }()
+
+	err := common.CopyTcpConnection(clientConn, remoteConn)
 	if err != nil {
 		fmt.Println("CopyTcpConnection error", err)
+	} else {
+		fmt.Println("CopyTcpConnection success", err)
 	}
 }
 

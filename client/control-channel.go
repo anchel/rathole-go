@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
 
+	"github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
-	"github.com/anchel/rathole-go/util"
 )
 
 type ControlChannel struct {
@@ -36,7 +37,9 @@ func NewControlChannel(svcName string, clientConfig *config.ClientConfig, svcCon
 }
 
 func (cc *ControlChannel) Run(parentCtx context.Context) {
-	cancelCtx, _ := context.WithCancel(parentCtx)
+	cancelCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
 	var conn net.Conn
 	for i := 0; i < 3; i++ {
 		con, err := net.Dial("tcp", cc.clientConfig.RemoteAddr)
@@ -54,7 +57,9 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		return
 	}
 
-	digest := util.CalSha256(cc.svcName)
+	// defer conn.Close()
+
+	digest := common.CalSha256(cc.svcName)
 	fmt.Println("digest", digest)
 	req, err := http.NewRequest("GET", "/control/hello", nil)
 	if err != nil {
@@ -70,9 +75,9 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 	}
 	fmt.Println("send request /control/hello success")
 
-	// hello := make([]byte, 1)
-	// n, err = conn.Read(hello)
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	br := bufio.NewReader(conn)
+
+	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
 		fmt.Println("recv response /control/hello fail", err)
 		return
@@ -88,7 +93,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		return
 	}
 
-	session_key := util.CalSha256(cc.svcConfig.Token + nonce)
+	session_key := common.CalSha256(cc.svcConfig.Token + nonce)
 	req, err = http.NewRequest("GET", "/control/auth", nil)
 	if err != nil {
 		fmt.Println("create request /control/auth fail", err)
@@ -103,7 +108,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 	}
 	fmt.Println("send request /control/auth success")
 
-	resp, err = http.ReadResponse(bufio.NewReader(conn), nil)
+	resp, err = http.ReadResponse(br, nil)
 	if err != nil {
 		fmt.Println("recv response /control/auth fail", err)
 		return
@@ -119,13 +124,15 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 
 	go func() {
 		for {
-			resp, err = http.ReadResponse(bufio.NewReader(conn), nil)
+			resp, err = http.ReadResponse(br, nil)
 			if err != nil {
 				fmt.Println("recv response /control/cmd fail", err)
 				err_chan <- err
 				break
 			} else {
-				link_chan <- resp.Header.Get("cmd")
+				go func() {
+					link_chan <- resp.Header.Get("cmd")
+				}()
 			}
 		}
 	}()
@@ -152,7 +159,7 @@ OUTER:
 		case <-cancelCtx.Done():
 			fmt.Println("cc receive cancel")
 			break OUTER
-		case <-time.After(20 * time.Second):
+		case <-time.After(60 * time.Second):
 			fmt.Println("cc heartbeat timeout")
 			break OUTER
 		}
@@ -178,7 +185,7 @@ func run_data_channel(args RunDataChannelArgs) error {
 		return err
 	}
 
-	defer conn.Close() // 关闭连接
+	// defer conn.Close() // 关闭连接
 
 	req, err := http.NewRequest("GET", "/data/hello", nil)
 	if err != nil {
@@ -193,27 +200,57 @@ func run_data_channel(args RunDataChannelArgs) error {
 	}
 	fmt.Println("send request /data/hello success")
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	// 接下来读两个字节，第一个字节：0-fail 1-ok；第二个字节：1-tcp 2-udp
+	// rconn := common.NewRewindConn(conn)
+	// rconn.SetBufferSize(128)
+
+	var buf [2]byte
+	n, err := io.ReadFull(conn, buf[:])
 	if err != nil {
 		fmt.Println("recv response /data/hello fail", err)
 		return err
 	}
-
-	if resp.StatusCode != 200 { // 401 - token invalid
-		fmt.Println("recv response /data/hello not ok", resp.StatusCode)
+	if n != len(buf) {
+		fmt.Println("recv response /data/hello byte count not correct", n, len(buf))
+		return fmt.Errorf("recv response /data/hello byte count not correct, %d, %d", n, len(buf))
+	}
+	if buf[0] != 1 {
+		fmt.Println("recv response /data/hello not ok", buf)
 		return errors.New("recv response /data/hello not ok")
 	}
 
-	forwardType := resp.Header.Get("type") // tcp udp
+	forwardType := "tcp"
+	if buf[1] == 2 {
+		forwardType = "udp"
+	}
+	// resp, err := http.ReadResponse(bufio.NewReader(rconn), nil)
+	// if err != nil {
+	// 	fmt.Println("recv response /data/hello fail", err)
+	// 	return err
+	// }
+
+	// if resp.StatusCode != 200 { // 401 - token invalid
+	// 	fmt.Println("recv response /data/hello not ok", resp.StatusCode)
+	// 	return errors.New("recv response /data/hello not ok")
+	// }
+
+	// forwardType := resp.Header.Get("type") // tcp udp
+
 	if forwardType != string(args.svcConfig.Type) {
 		fmt.Println("forward type not equal", forwardType, args.svcConfig.Type)
 		return errors.New("forward type not equal")
 	}
 
+	fmt.Println("recv response /data/hello ok", forwardType, buf)
+	// rconn.Rewind()
+	// rconn.StopBuffering()
+	// rconn.Discard(2)
+	// common.DiscardRewindConn(rconn, resp)
+
 	if forwardType == "tcp" {
-		run_data_channel_for_tcp(conn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_tcp(conn, args.svcConfig.LocalAddr)
 	} else if forwardType == "udp" {
-		run_data_channel_for_udp(conn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_udp(conn, args.svcConfig.LocalAddr)
 	} else {
 		fmt.Println("unknown forward type", forwardType)
 	}
@@ -221,20 +258,38 @@ func run_data_channel(args RunDataChannelArgs) error {
 	return nil
 }
 
-func run_data_channel_for_tcp(conn net.Conn, localAddr string) {
-	connection, err := net.Dial("tcp", localAddr)
+func forward_data_channel_for_tcp(remoteConn net.Conn, localAddr string) {
+	clientConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
 		fmt.Println("connect localaddr fail", err)
 		return
 	}
-	defer connection.Close()
+	// defer clientConn.Close()
+	fmt.Println("forward_data_channel_for_tcp", remoteConn.LocalAddr())
 
-	err = util.CopyTcpConnection(connection, conn)
+	// for {
+	// 	buf := make([]byte, 1024)
+	// 	n, e := remoteConn.Read(buf)
+	// 	fmt.Println("remoteConn Read", n, e)
+	// 	if e != nil {
+	// 		fmt.Println("remoteConn Read error", e)
+	// 		break
+	// 	}
+	// 	if n > 0 {
+	// 		fmt.Println("remoteConn Read", string(buf[:n]))
+	// 		wn, e := clientConn.Write(buf)
+	// 		fmt.Println("remoteConn Read and Write to client", wn, e)
+	// 	}
+	// }
+
+	err = common.CopyTcpConnection(clientConn, remoteConn)
 	if err != nil {
 		fmt.Println("CopyTcpConnection error", err)
+	} else {
+		fmt.Println("CopyTcpConnection success", err)
 	}
 }
 
-func run_data_channel_for_udp(conn net.Conn, localAddr string) {
+func forward_data_channel_for_udp(conn net.Conn, localAddr string) {
 
 }
