@@ -84,13 +84,14 @@ label_for:
 }
 
 func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool) {
-	l, err := net.Listen("tcp", cc.service.bind_addr)
+	tcpAddr, _ := net.ResolveTCPAddr("tcp", cc.service.bind_addr)
+	l, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		fmt.Println("service listen fail", err)
 		return
 	}
 	for {
-		remoteConn, err := l.Accept()
+		remoteConn, err := l.AcceptTCP()
 		if err != nil {
 			fmt.Println("service accept fail", err)
 			break
@@ -99,7 +100,7 @@ func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool) {
 	}
 }
 
-func forward_tcp_connection(cc *ControlChannel, remoteConn net.Conn, data_req_chan chan<- bool) {
+func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_req_chan chan<- bool) {
 	// defer remoteConn.Close()
 
 	fmt.Println("forward_tcp_connection", remoteConn.RemoteAddr())
@@ -110,6 +111,13 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn net.Conn, data_req_ch
 	}()
 
 	clientConn := <-cc.data_chan
+
+	clientTCPConn, ok := clientConn.(*net.TCPConn)
+	if !ok {
+		fmt.Println("获取的客户的连接不是tcp连接")
+		return
+	}
+
 	fmt.Println("成功取得客户的连接", clientConn.RemoteAddr())
 	// defer clientConn.Close()
 
@@ -131,7 +139,7 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn net.Conn, data_req_ch
 
 	// }()
 
-	err := common.CopyTcpConnection(clientConn, remoteConn)
+	err := common.CopyTcpConnection(clientTCPConn, remoteConn)
 	if err != nil {
 		fmt.Println("CopyTcpConnection error", err)
 	} else {

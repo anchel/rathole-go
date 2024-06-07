@@ -101,7 +101,7 @@ func ResponseWriteWithBuffered(src *http.Response, dst io.Writer) (err error) {
 	return
 }
 
-func CopyTcpConnection(dst net.Conn, src net.Conn) error {
+func CopyTcpConnection(dst *net.TCPConn, src *net.TCPConn) error {
 	chan_remote_to_local := make(chan error)
 	chan_local_to_remote := make(chan error)
 
@@ -126,7 +126,7 @@ label_for:
 			err1 = e1
 			errCount++
 			if err1 == nil {
-				dst.Close()
+				err1 = dst.CloseWrite()
 			}
 			if errCount >= 2 {
 				break label_for
@@ -135,7 +135,7 @@ label_for:
 			err2 = e2
 			errCount++
 			if err2 == nil {
-				src.Close()
+				err2 = src.CloseWrite()
 			}
 			if errCount >= 2 {
 				break label_for

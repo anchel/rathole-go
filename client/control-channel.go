@@ -167,10 +167,12 @@ OUTER:
 }
 
 func run_data_channel(args RunDataChannelArgs) error {
-	var conn net.Conn
+	var conn *net.TCPConn
 	var err error
+	tcpAdr, _ := net.ResolveTCPAddr("tcp", args.clientConfig.RemoteAddr)
+
 	for i := 0; i < 3; i++ {
-		con, err := net.Dial("tcp", args.clientConfig.RemoteAddr)
+		con, err := net.DialTCP("tcp", nil, tcpAdr)
 		if err != nil {
 			fmt.Println("datachannel server connect fail", err)
 			continue
@@ -258,8 +260,9 @@ func run_data_channel(args RunDataChannelArgs) error {
 	return nil
 }
 
-func forward_data_channel_for_tcp(remoteConn net.Conn, localAddr string) {
-	clientConn, err := net.Dial("tcp", localAddr)
+func forward_data_channel_for_tcp(remoteConn *net.TCPConn, localAddr string) {
+	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
+	clientConn, err := net.DialTCP("tcp", nil, tcpAdr)
 	if err != nil {
 		fmt.Println("connect localaddr fail", err)
 		return

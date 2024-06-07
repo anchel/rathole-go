@@ -53,14 +53,15 @@ func (s *Server) init() {
 }
 
 func (s *Server) acceptLoop() {
-	l, err := net.Listen("tcp", s.config.BindAddr)
+	tcpAddr, _ := net.ResolveTCPAddr("tcp", s.config.BindAddr)
+	l, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		fmt.Println("server listen fail", err)
 		return
 	}
 	fmt.Println("server starting listen")
 	for {
-		conn, err := l.Accept()
+		conn, err := l.AcceptTCP()
 		if err != nil {
 			fmt.Println("server accept fail", err)
 			break
@@ -72,7 +73,7 @@ func (s *Server) acceptLoop() {
 	fmt.Println("server goto shutdown")
 }
 
-func serveConnection(s *Server, conn net.Conn) {
+func serveConnection(s *Server, conn *net.TCPConn) {
 	// defer conn.Close()
 
 	req, err := http.ReadRequest(bufio.NewReader(conn))
@@ -89,7 +90,7 @@ func serveConnection(s *Server, conn net.Conn) {
 	}
 }
 
-func do_control_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
+func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) {
 	digest := req.Header.Get("service")
 	if len(digest) <= 0 {
 		fmt.Println("recv /control/hello service nil")
@@ -178,7 +179,7 @@ func do_control_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
 	cc.Run(conn)
 }
 
-func do_data_channel_handshake(s *Server, conn net.Conn, req *http.Request) {
+func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) {
 	sessionKey := req.Header.Get("session_key")
 
 	var cc *ControlChannel
