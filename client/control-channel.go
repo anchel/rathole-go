@@ -57,7 +57,10 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		return
 	}
 
-	// defer conn.Close()
+	defer func() {
+		fmt.Println("controlchannel conn.Close")
+		defer conn.Close()
+	}()
 
 	digest := common.CalSha256(cc.svcName)
 	fmt.Println("digest", digest)
@@ -68,7 +71,6 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 	}
 	req.Header.Set("service", digest)
 	err = req.Write(conn)
-	// n, err := conn.Write([]byte(digest))
 	if err != nil {
 		fmt.Println("send request /control/hello fail", err)
 		return
@@ -82,7 +84,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		fmt.Println("recv response /control/hello fail", err)
 		return
 	}
-	// fmt.Println("recv response /control/hello", resp)
+
 	if resp.StatusCode != http.StatusOK {
 		fmt.Println("recv response /control/hello not ok", resp.StatusCode)
 		return
@@ -149,7 +151,7 @@ OUTER:
 					svcConfig:    cc.svcConfig,
 					sessionKey:   session_key,
 				}
-				go run_data_channel(args)
+				go create_data_channel(args)
 			} else { // "heartbeat"
 				fmt.Println("cc server send heartbeat")
 			}
@@ -166,7 +168,7 @@ OUTER:
 	}
 }
 
-func run_data_channel(args RunDataChannelArgs) error {
+func create_data_channel(args RunDataChannelArgs) error {
 	var conn *net.TCPConn
 	var err error
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", args.clientConfig.RemoteAddr)
@@ -187,7 +189,14 @@ func run_data_channel(args RunDataChannelArgs) error {
 		return err
 	}
 
-	// defer conn.Close() // 关闭连接
+	fmt.Println("datachannel connected to server, LocalAddr:", conn.LocalAddr())
+
+	defer func() {
+		fmt.Println("datachannel conn.Close")
+		conn.Close() // 关闭连接
+	}()
+
+	// conn.SetNoDelay(true)
 
 	req, err := http.NewRequest("GET", "/data/hello", nil)
 	if err != nil {
@@ -237,13 +246,19 @@ func run_data_channel(args RunDataChannelArgs) error {
 
 func forward_data_channel_for_tcp(remoteConn *net.TCPConn, localAddr string) {
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
+	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
 	clientConn, err := net.DialTCP("tcp", nil, tcpAdr)
 	if err != nil {
 		fmt.Println("connect localaddr fail", err)
 		return
 	}
-	// defer clientConn.Close()
-	fmt.Println("forward_data_channel_for_tcp", remoteConn.LocalAddr())
+	defer func() {
+		fmt.Println("forward_data_channel_for_tcp clientConn.Close()")
+		clientConn.Close()
+	}()
+	// clientConn.SetNoDelay(true)
+
+	fmt.Println("forward_data_channel_for_tcp, clientConn.LocalAddr", clientConn.LocalAddr())
 
 	err = common.CopyTcpConnection(clientConn, remoteConn)
 	if err != nil {
@@ -253,6 +268,6 @@ func forward_data_channel_for_tcp(remoteConn *net.TCPConn, localAddr string) {
 	}
 }
 
-func forward_data_channel_for_udp(conn net.Conn, localAddr string) {
+func forward_data_channel_for_udp(conn *net.TCPConn, localAddr string) {
 
 }

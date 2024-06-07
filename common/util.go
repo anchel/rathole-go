@@ -125,8 +125,8 @@ label_for:
 		case e1 := <-chan_remote_to_local:
 			err1 = e1
 			errCount++
-			if err1 == nil {
-				err1 = dst.CloseWrite()
+			if e := dst.CloseWrite(); e != nil {
+				fmt.Println("remote to local, CloseWrite local error", e)
 			}
 			if errCount >= 2 {
 				break label_for
@@ -134,8 +134,9 @@ label_for:
 		case e2 := <-chan_local_to_remote:
 			err2 = e2
 			errCount++
-			if err2 == nil {
-				err2 = src.CloseWrite()
+			e := src.CloseWrite()
+			if e != nil {
+				fmt.Println("local to remote, CloseWrite remote error", e)
 			}
 			if errCount >= 2 {
 				break label_for
