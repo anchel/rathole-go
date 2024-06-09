@@ -1,35 +1,47 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"time"
 
-	"github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
+	"github.com/anchel/rathole-go/internal/common"
 )
 
 type ControlChannel struct {
 	session_key  string
 	clientConfig *config.ServerConfig
 	service      *Service
+	s            *Server
 	data_chan    chan net.Conn
+	cancelCtx    context.Context
+	cancel       context.CancelFunc
+	err          error
 }
 
-func NewControlChannel(session_key string, conf *config.ServerConfig, service *Service) *ControlChannel {
+func NewControlChannel(parentCtx context.Context, session_key string, conf *config.ServerConfig, service *Service, s *Server) *ControlChannel {
+	ctx, cancel := context.WithCancel(parentCtx)
 	cc := &ControlChannel{
 		session_key:  session_key,
 		clientConfig: conf,
 		service:      service,
+		s:            s,
 		data_chan:    make(chan net.Conn, 6),
+		cancelCtx:    ctx,
+		cancel:       cancel,
 	}
 
 	return cc
 }
 
 func (cc *ControlChannel) Close() {
-	// todo
+	fmt.Println("ControlCancel Close")
+	cc.err = errors.New("cc close")
+	cc.cancel()
 }
 
 func (cc *ControlChannel) Run(conn net.Conn) {
@@ -41,19 +53,22 @@ func (cc *ControlChannel) Run(conn net.Conn) {
 		go run_udp_loop(cc)
 	}
 
-	var err error
 label_for:
 	for {
-		var errChan <-chan time.Time
-		timerHeartbeat := time.After(55 * time.Second)
-		if err != nil {
-			errChan = time.After(0)
+		timerHeartbeat := time.After(20 * time.Second)
+		if cc.err != nil {
+			fmt.Println("cc for loop: cc.err != nil, break")
+			break
 		}
 		select {
-		case <-errChan:
-			fmt.Println("error occur", err)
+		case <-cc.cancelCtx.Done():
+			fmt.Println("ControlChannel receive cancel")
 			break label_for
 		case <-data_req_chan:
+			fmt.Println("start send /contro/cmd datachannel")
+			if cc.err != nil {
+				continue label_for
+			}
 			go func() {
 				resp := &http.Response{
 					Status:     "200 OK",
@@ -61,12 +76,17 @@ label_for:
 					Header:     make(map[string][]string),
 				}
 				resp.Header.Set("cmd", "datachannel")
-				err = common.ResponseWriteWithBuffered(resp, conn)
-				if err != nil {
-					fmt.Println("send /control/cmd datachannel fail", err)
+				cc.err = common.ResponseWriteWithBuffered(resp, conn)
+				if cc.err != nil {
+					fmt.Println("send /control/cmd datachannel fail", cc.err)
+					cc.cancel()
 				}
 			}()
 		case <-timerHeartbeat:
+			fmt.Println("start send /contro/cmd heartbeat")
+			if cc.err != nil {
+				continue label_for
+			}
 			go func() {
 				resp := &http.Response{
 					Status:     "200 OK",
@@ -74,29 +94,45 @@ label_for:
 					Header:     make(map[string][]string),
 				}
 				resp.Header.Set("cmd", "heartbeat")
-				err = common.ResponseWriteWithBuffered(resp, conn)
-				if err != nil {
-					fmt.Println("send /control/cmd heartbeat fail", err)
+				cc.err = common.ResponseWriteWithBuffered(resp, conn)
+				if cc.err != nil {
+					fmt.Println("send /control/cmd heartbeat fail", cc.err)
+					cc.cancel()
 				}
 			}()
 		}
 	}
+
+	fmt.Println("ControlChannel Run Over")
 }
 
 func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool) {
+	if cc.err != nil {
+		fmt.Println("cc.err != nil, run_tcp_loop stop")
+		return
+	}
 	tcpAddr, _ := net.ResolveTCPAddr("tcp", cc.service.bind_addr)
 	l, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		fmt.Println("service listen fail", err)
 		return
 	}
-	for {
-		remoteConn, err := l.AcceptTCP()
-		if err != nil {
-			fmt.Println("service accept fail", err)
-			break
+	go func() {
+		for {
+			remoteConn, err := l.AcceptTCP()
+			if err != nil {
+				fmt.Println("service accept fail", err)
+				break
+			}
+			go forward_tcp_connection(cc, remoteConn, data_req_chan)
 		}
-		go forward_tcp_connection(cc, remoteConn, data_req_chan)
+	}()
+
+	<-cc.cancelCtx.Done()
+	fmt.Println("run_tcp_loop starting to finish")
+	err = l.Close()
+	if err != nil {
+		fmt.Println("run_tcp_loop finish error", err)
 	}
 }
 
@@ -107,10 +143,18 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_re
 
 	// 发送命令，指示客户端主动连接服务器
 	go func() {
-		data_req_chan <- true
+		select {
+		case <-cc.cancelCtx.Done():
+		case data_req_chan <- true:
+		}
 	}()
 
-	clientConn := <-cc.data_chan
+	var clientConn net.Conn
+	select {
+	case <-cc.cancelCtx.Done():
+		return
+	case clientConn = <-cc.data_chan:
+	}
 
 	clientTCPConn, ok := clientConn.(*net.TCPConn)
 	if !ok {
@@ -119,25 +163,7 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_re
 	}
 
 	fmt.Println("成功取得客户的连接", clientConn.RemoteAddr())
-	// defer clientConn.Close()
-
-	// go func() {
-	// 	for {
-	// 		buf := make([]byte, 1024)
-	// 		n, e := remoteConn.Read(buf)
-	// 		fmt.Println("remoteConn Read", n, e)
-	// 		if e != nil {
-	// 			fmt.Println("remoteConn Read error", e)
-	// 			break
-	// 		}
-	// 		if n > 0 {
-	// 			fmt.Println("remoteConn Read", string(buf[:n]))
-	// 			wn, e := clientConn.Write(buf)
-	// 			fmt.Println("remoteConn Read and Write to client", wn, e)
-	// 		}
-	// 	}
-
-	// }()
+	defer clientConn.Close()
 
 	err := common.CopyTcpConnection(clientTCPConn, remoteConn)
 	if err != nil {

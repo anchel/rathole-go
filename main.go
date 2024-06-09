@@ -6,8 +6,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/anchel/rathole-go/client"
-	util "github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
+	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/pb/basic/basicpb"
 	"github.com/anchel/rathole-go/server"
 	"github.com/davecgh/go-spew/spew"
@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	cliArgs, err := util.GetCliArgs()
+	cliArgs, err := common.GetCliArgs()
 	// spew.Dump(cliArgs)
 	if err != nil {
 		fmt.Println(err)
@@ -28,10 +28,10 @@ func main() {
 	fmt.Println("runmode", runMode)
 
 	switch runMode {
-	case util.RUN_CLIENT:
+	case common.RUN_CLIENT:
 		fmt.Println("run as a client")
 		run_client(cliArgs)
-	case util.RUN_SERVER:
+	case common.RUN_SERVER:
 		fmt.Println("run as a server")
 		run_server(cliArgs)
 	default:
@@ -39,12 +39,12 @@ func main() {
 	}
 }
 
-func run_client(args *util.CliArgs) {
+func run_client(args *common.CliArgs) {
 	client := client.NewClient(&args.Config.Client)
 	client.Run()
 }
 
-func run_server(args *util.CliArgs) {
+func run_server(args *common.CliArgs) {
 	server := server.NewServer(&args.Config.Server)
 	server.Run()
 }

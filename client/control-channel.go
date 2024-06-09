@@ -3,15 +3,15 @@ package client
 import (
 	"bufio"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
 
-	"github.com/anchel/rathole-go/common"
 	"github.com/anchel/rathole-go/config"
+	"github.com/anchel/rathole-go/internal/common"
 )
 
 type ControlChannel struct {
@@ -197,6 +197,7 @@ func create_data_channel(args RunDataChannelArgs) error {
 	}()
 
 	// conn.SetNoDelay(true)
+	myconn := common.NewMyConn(conn)
 
 	req, err := http.NewRequest("GET", "/data/hello", nil)
 	if err != nil {
@@ -204,37 +205,45 @@ func create_data_channel(args RunDataChannelArgs) error {
 		return err
 	}
 	req.Header.Set("session_key", args.sessionKey)
-	err = req.Write(conn)
+	err = req.Write(myconn)
 	if err != nil {
 		fmt.Println("send request /data/hello fail", err)
 		return err
 	}
 	fmt.Println("send request /data/hello success")
 
-	resp := common.ResponseDataHello{Ok: false, Typ: ""}
-	dec := gob.NewDecoder(conn)
-	err = dec.Decode(&resp)
+	// resp := common.ResponseDataHello{Ok: false, Typ: ""}
+	// dec := gob.NewDecoder(myconn)
+	// err = dec.Decode(&resp)
+	respbuf := [...]byte{0, 0}
+	_, err = io.ReadFull(myconn, respbuf[:])
 	if err != nil {
 		fmt.Println("recv response /data/hello fail", err)
 		return err
 	}
 
-	if !resp.Ok {
-		fmt.Println("recv response /data/hello not ok", resp)
+	if respbuf[0] != 1 {
+		fmt.Println("recv response /data/hello not ok", respbuf)
 		return errors.New("recv response /data/hello not ok")
 	}
 
-	forwardType := resp.Typ
+	forwardType := config.ServiceType("")
+	switch respbuf[1] {
+	case 1:
+		forwardType = config.TCP
+	case 2:
+		forwardType = config.UDP
+	}
 
 	if forwardType != args.svcConfig.Type {
 		fmt.Println("forward type not equal", forwardType, args.svcConfig.Type)
 		return errors.New("forward type not equal")
 	}
 
-	fmt.Println("recv response /data/hello ok", forwardType, resp)
+	fmt.Println("recv response /data/hello ok", forwardType, respbuf)
 
 	if forwardType == "tcp" {
-		forward_data_channel_for_tcp(conn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_tcp(myconn, args.svcConfig.LocalAddr)
 	} else if forwardType == "udp" {
 		forward_data_channel_for_udp(conn, args.svcConfig.LocalAddr)
 	} else {
@@ -244,7 +253,7 @@ func create_data_channel(args RunDataChannelArgs) error {
 	return nil
 }
 
-func forward_data_channel_for_tcp(remoteConn *net.TCPConn, localAddr string) {
+func forward_data_channel_for_tcp(remoteConn *common.MyConn, localAddr string) {
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
 	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
 	clientConn, err := net.DialTCP("tcp", nil, tcpAdr)
