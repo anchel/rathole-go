@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 	"github.com/anchel/rathole-go/client"
@@ -27,26 +29,29 @@ func main() {
 	}
 	fmt.Println("runmode", runMode)
 
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+
 	switch runMode {
 	case common.RUN_CLIENT:
 		fmt.Println("run as a client")
-		run_client(cliArgs)
+		run_client(c, cliArgs)
 	case common.RUN_SERVER:
 		fmt.Println("run as a server")
-		run_server(cliArgs)
+		run_server(c, cliArgs)
 	default:
 		fmt.Println("unknown runmode")
 	}
 }
 
-func run_client(args *common.CliArgs) {
+func run_client(c chan os.Signal, args *common.CliArgs) {
 	client := client.NewClient(&args.Config.Client)
-	client.Run()
+	client.Run(c)
 }
 
-func run_server(args *common.CliArgs) {
+func run_server(c chan os.Signal, args *common.CliArgs) {
 	server := server.NewServer(&args.Config.Server)
-	server.Run()
+	server.Run(c)
 }
 
 func testProto() {

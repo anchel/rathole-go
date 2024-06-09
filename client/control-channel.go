@@ -15,10 +15,16 @@ import (
 )
 
 type ControlChannel struct {
-	svcName       string
-	shutdown_chan chan bool
-	clientConfig  *config.ClientConfig
-	svcConfig     *config.ClientServiceConfig
+	svcName string
+
+	clientConfig *config.ClientConfig
+	svcConfig    *config.ClientServiceConfig
+
+	client *Client
+
+	cancelCtx context.Context
+	cancel    context.CancelFunc
+	err       error
 }
 
 type RunDataChannelArgs struct {
@@ -27,18 +33,29 @@ type RunDataChannelArgs struct {
 	sessionKey   string
 }
 
-func NewControlChannel(svcName string, clientConfig *config.ClientConfig, svcConfig *config.ClientServiceConfig) *ControlChannel {
+func NewControlChannel(client *Client, svcName string, clientConfig *config.ClientConfig, svcConfig *config.ClientServiceConfig) *ControlChannel {
+	cancelCtx, cancel := context.WithCancel(client.cancelCtx)
+
 	return &ControlChannel{
-		svcName:       svcName,
-		shutdown_chan: make(chan bool),
-		clientConfig:  clientConfig,
-		svcConfig:     svcConfig,
+		svcName:      svcName,
+		client:       client,
+		clientConfig: clientConfig,
+		svcConfig:    svcConfig,
+		cancelCtx:    cancelCtx,
+		cancel:       cancel,
 	}
 }
 
-func (cc *ControlChannel) Run(parentCtx context.Context) {
-	cancelCtx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+func (cc *ControlChannel) Close() {
+	fmt.Println("client cc close")
+	cc.err = errors.New("client cc close")
+	cc.cancel()
+}
+
+func (cc *ControlChannel) Run() {
+	if cc.err != nil {
+		return
+	}
 
 	var conn net.Conn
 	for i := 0; i < 3; i++ {
@@ -54,6 +71,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 
 	if conn == nil {
 		fmt.Println("server retry fail ")
+		cc.Reconnect()
 		return
 	}
 
@@ -115,7 +133,7 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		fmt.Println("recv response /control/auth fail", err)
 		return
 	}
-	// fmt.Println("recv response /control/auth", resp)
+
 	if resp.StatusCode != http.StatusOK { // 401-token不正确，拒绝访问
 		fmt.Println("recv response /control/auth not ok", resp.StatusCode)
 		return
@@ -139,11 +157,13 @@ func (cc *ControlChannel) Run(parentCtx context.Context) {
 		}
 	}()
 
+	needReconnect := false
+
 OUTER:
 	for {
 		select {
 		case cmd := <-link_chan:
-			fmt.Println("cc read cmd", cmd)
+			// fmt.Println("cc read cmd", cmd)
 			if cmd == "datachannel" {
 				fmt.Println("cc server send create datachannel")
 				args := RunDataChannelArgs{
@@ -151,24 +171,38 @@ OUTER:
 					svcConfig:    cc.svcConfig,
 					sessionKey:   session_key,
 				}
-				go create_data_channel(args)
+
+				go create_data_channel(cc.cancelCtx, args)
 			} else { // "heartbeat"
 				fmt.Println("cc server send heartbeat")
 			}
 		case <-err_chan:
 			fmt.Println("cc select error")
+			needReconnect = true
 			break OUTER
-		case <-cancelCtx.Done():
+		case <-cc.cancelCtx.Done():
 			fmt.Println("cc receive cancel")
 			break OUTER
 		case <-time.After(60 * time.Second):
 			fmt.Println("cc heartbeat timeout")
+			needReconnect = true
 			break OUTER
 		}
 	}
+
+	// 重连
+	if needReconnect {
+		cc.Reconnect()
+	}
 }
 
-func create_data_channel(args RunDataChannelArgs) error {
+func (cc *ControlChannel) Reconnect() {
+	fmt.Println("cc need reconnect", cc.svcName)
+	time.Sleep(5 * time.Second)
+	cc.client.svc_chan <- cc.svcName
+}
+
+func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) error {
 	var conn *net.TCPConn
 	var err error
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", args.clientConfig.RemoteAddr)
@@ -196,7 +230,6 @@ func create_data_channel(args RunDataChannelArgs) error {
 		conn.Close() // 关闭连接
 	}()
 
-	// conn.SetNoDelay(true)
 	myconn := common.NewMyConn(conn)
 
 	req, err := http.NewRequest("GET", "/data/hello", nil)
@@ -212,9 +245,6 @@ func create_data_channel(args RunDataChannelArgs) error {
 	}
 	fmt.Println("send request /data/hello success")
 
-	// resp := common.ResponseDataHello{Ok: false, Typ: ""}
-	// dec := gob.NewDecoder(myconn)
-	// err = dec.Decode(&resp)
 	respbuf := [...]byte{0, 0}
 	_, err = io.ReadFull(myconn, respbuf[:])
 	if err != nil {
@@ -243,9 +273,9 @@ func create_data_channel(args RunDataChannelArgs) error {
 	fmt.Println("recv response /data/hello ok", forwardType, respbuf)
 
 	if forwardType == "tcp" {
-		forward_data_channel_for_tcp(myconn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_tcp(parentCtx, myconn, args.svcConfig.LocalAddr)
 	} else if forwardType == "udp" {
-		forward_data_channel_for_udp(conn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_udp(parentCtx, conn, args.svcConfig.LocalAddr)
 	} else {
 		fmt.Println("unknown forward type", forwardType)
 	}
@@ -253,7 +283,7 @@ func create_data_channel(args RunDataChannelArgs) error {
 	return nil
 }
 
-func forward_data_channel_for_tcp(remoteConn *common.MyConn, localAddr string) {
+func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyConn, localAddr string) {
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
 	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
 	clientConn, err := net.DialTCP("tcp", nil, tcpAdr)
@@ -265,11 +295,10 @@ func forward_data_channel_for_tcp(remoteConn *common.MyConn, localAddr string) {
 		fmt.Println("forward_data_channel_for_tcp clientConn.Close()")
 		clientConn.Close()
 	}()
-	// clientConn.SetNoDelay(true)
 
 	fmt.Println("forward_data_channel_for_tcp, clientConn.LocalAddr", clientConn.LocalAddr())
 
-	err = common.CopyTcpConnection(clientConn, remoteConn)
+	err = common.CopyTcpConnection(ctx, clientConn, remoteConn)
 	if err != nil {
 		fmt.Println("CopyTcpConnection error", err)
 	} else {
@@ -277,6 +306,6 @@ func forward_data_channel_for_tcp(remoteConn *common.MyConn, localAddr string) {
 	}
 }
 
-func forward_data_channel_for_udp(conn *net.TCPConn, localAddr string) {
+func forward_data_channel_for_udp(ctx context.Context, conn *net.TCPConn, localAddr string) {
 
 }

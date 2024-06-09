@@ -3,6 +3,7 @@ package common
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -59,7 +60,7 @@ func GetCliArgs() (*CliArgs, error) {
 	isClient := flag.Bool("client", false, "-client run as a client")
 	flag.Parse()
 	args := flag.Args()
-	fmt.Println("args", args)
+	// fmt.Println("args", args)
 	if len(args) <= 0 {
 		return nil, errors.New("未指定配置文件")
 	}
@@ -108,7 +109,7 @@ type ReadCloseWriter interface {
 	CloseWrite() error
 }
 
-func CopyTcpConnection(dst ReadCloseWriter, src ReadCloseWriter) error {
+func CopyTcpConnection(ctx context.Context, dst ReadCloseWriter, src ReadCloseWriter) error {
 	chan_remote_to_local := make(chan error)
 	chan_local_to_remote := make(chan error)
 
@@ -129,6 +130,8 @@ func CopyTcpConnection(dst ReadCloseWriter, src ReadCloseWriter) error {
 label_for:
 	for {
 		select {
+		case <-ctx.Done():
+			break label_for
 		case e1 := <-chan_remote_to_local:
 			err1 = e1
 			errCount++

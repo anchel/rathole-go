@@ -7,9 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/anchel/rathole-go/config"
@@ -32,9 +30,6 @@ type Server struct {
 	mu                    sync.Mutex
 	cancelCtx             context.Context
 	cancel                context.CancelFunc
-
-	ccFinishing     bool
-	ccFinishingCond *sync.Cond
 }
 
 func NewServer(c *config.ServerConfig) *Server {
@@ -46,14 +41,12 @@ func NewServer(c *config.ServerConfig) *Server {
 	s.cancelCtx = ctx
 	s.cancel = cancel
 
-	s.ccFinishing = false
-	s.ccFinishingCond = sync.NewCond(&sync.Mutex{})
 	return s
 }
 
-func (s *Server) Run() {
+func (s *Server) Run(sigChan chan os.Signal) {
 	s.init()
-	s.acceptLoop()
+	s.acceptLoop(sigChan)
 }
 
 func (s *Server) init() {
@@ -68,7 +61,7 @@ func (s *Server) init() {
 	}
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server) acceptLoop(sigChan chan os.Signal) {
 
 	go func() {
 		tcpAddr, _ := net.ResolveTCPAddr("tcp", s.config.BindAddr)
@@ -89,13 +82,10 @@ func (s *Server) acceptLoop() {
 		}
 	}()
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
 label_for:
 	for {
 		select {
-		case cc := <-c:
+		case cc := <-sigChan:
 			fmt.Println("server receive interrupt", cc)
 			s.cancel()
 		case <-s.cancelCtx.Done():

@@ -40,7 +40,7 @@ func NewControlChannel(parentCtx context.Context, session_key string, conf *conf
 
 func (cc *ControlChannel) Close() {
 	fmt.Println("ControlCancel Close")
-	cc.err = errors.New("cc close")
+	cc.err = errors.New("server cc close")
 	cc.cancel()
 }
 
@@ -165,7 +165,7 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_re
 	fmt.Println("成功取得客户的连接", clientConn.RemoteAddr())
 	defer clientConn.Close()
 
-	err := common.CopyTcpConnection(clientTCPConn, remoteConn)
+	err := common.CopyTcpConnection(cc.cancelCtx, clientTCPConn, remoteConn)
 	if err != nil {
 		fmt.Println("CopyTcpConnection error", err)
 	} else {
