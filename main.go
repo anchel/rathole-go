@@ -6,19 +6,13 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchel/rathole-go/client"
-	"github.com/anchel/rathole-go/config"
 	"github.com/anchel/rathole-go/internal/common"
-	"github.com/anchel/rathole-go/pb/basic/basicpb"
 	"github.com/anchel/rathole-go/server"
-	"github.com/davecgh/go-spew/spew"
-	"google.golang.org/protobuf/proto"
 )
 
 func main() {
 	cliArgs, err := common.GetCliArgs()
-	// spew.Dump(cliArgs)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -52,32 +46,4 @@ func run_client(c chan os.Signal, args *common.CliArgs) {
 func run_server(c chan os.Signal, args *common.CliArgs) {
 	server := server.NewServer(&args.Config.Server)
 	server.Run(c)
-}
-
-func testProto() {
-	m := &basicpb.HelloMessage{
-		Ver:    1,
-		Digest: "hello",
-	}
-	out, err := proto.Marshal(m)
-	if err != nil {
-		fmt.Println("Marshal error", err)
-		return
-	}
-	fmt.Println(out)
-}
-
-func testLoadToml() {
-	content, err := os.ReadFile("local/client.toml")
-	if err != nil {
-		fmt.Println("ReadFile error", err)
-		return
-	}
-	var conf config.Config
-	_, err = toml.Decode(string(content), &conf)
-	if err != nil {
-		fmt.Println("Decode error", err)
-		return
-	}
-	spew.Dump(conf)
 }

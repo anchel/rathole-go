@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/anchel/rathole-go/config"
@@ -198,7 +199,7 @@ OUTER:
 
 func (cc *ControlChannel) Reconnect() {
 	fmt.Println("cc need reconnect", cc.svcName)
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	cc.client.svc_chan <- cc.svcName
 }
 
@@ -230,7 +231,7 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 		conn.Close() // 关闭连接
 	}()
 
-	myconn := common.NewMyConn(conn)
+	myconn := common.NewMyTcpConn(conn)
 
 	req, err := http.NewRequest("GET", "/data/hello", nil)
 	if err != nil {
@@ -270,12 +271,12 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 		return errors.New("forward type not equal")
 	}
 
-	fmt.Println("recv response /data/hello ok", forwardType, respbuf)
+	fmt.Println("recv response /data/hello ok", forwardType, respbuf, myconn.LocalAddr(), myconn.RemoteAddr())
 
 	if forwardType == "tcp" {
-		forward_data_channel_for_tcp(parentCtx, myconn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_tcp(parentCtx, myconn, args.svcConfig.LocalAddr, string(forwardType))
 	} else if forwardType == "udp" {
-		forward_data_channel_for_udp(parentCtx, conn, args.svcConfig.LocalAddr)
+		forward_data_channel_for_udp(parentCtx, myconn, args.svcConfig.LocalAddr, string(forwardType))
 	} else {
 		fmt.Println("unknown forward type", forwardType)
 	}
@@ -283,10 +284,10 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 	return nil
 }
 
-func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyConn, localAddr string) {
+func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
 	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
-	clientConn, err := net.DialTCP("tcp", nil, tcpAdr)
+	clientConn, err := net.DialTCP(network, nil, tcpAdr)
 	if err != nil {
 		fmt.Println("connect localaddr fail", err)
 		return
@@ -306,6 +307,123 @@ func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyConn
 	}
 }
 
-func forward_data_channel_for_udp(ctx context.Context, conn *net.TCPConn, localAddr string) {
+func forward_data_channel_for_udp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
+	laddr, err := net.ResolveUDPAddr(network, localAddr)
+	if err != nil {
+		fmt.Println("forward_data_channel_for_udp localAddr invalid", err)
+		return
+	}
 
+	remotePacketChan := make(chan *common.UdpPacket)
+
+	go func() {
+		for {
+			p := make([]byte, 8192)
+			remoteAddr, n, err := remoteConn.ReadPacket(p)
+			if err != nil {
+				fmt.Println("forward_data_channel_for_udp ReadPacket error", err)
+				return
+			}
+			fmt.Println("forward_data_channel_for_udp remoteConn.ReadPacket", n, remoteAddr)
+
+			select {
+			case <-ctx.Done():
+				return
+			case remotePacketChan <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
+			}
+		}
+	}()
+
+	mu := sync.Mutex{}
+	udpConnMapping := make(map[string]*net.UDPConn)
+
+label_for_one:
+	for {
+		select {
+		case <-ctx.Done():
+			break label_for_one
+		case remotePacket := <-remotePacketChan:
+			rAddrStr := remotePacket.Addr.String()
+			mu.Lock()
+			udpConn, ok := udpConnMapping[rAddrStr]
+			mu.Unlock()
+			if ok {
+				go forward_packet_tcp_to_udp(udpConn, remotePacket, laddr)
+			} else {
+				randAddr, err := net.ResolveUDPAddr(network, "") // 随机端口
+				if err != nil {
+					fmt.Println("forward_data_channel_for_udp resolveudpaddr error", err)
+					break label_for_one
+				}
+				conn, err := net.ListenUDP(network, randAddr)
+				if err != nil {
+					fmt.Println("forward_data_channel_for_udp ListenUDP fail", err)
+					break label_for_one
+				}
+				fmt.Println("forward_data_channel_for_udp ListenUDP LocalAddr", conn.LocalAddr())
+				mu.Lock()
+				udpConnMapping[rAddrStr] = conn
+				mu.Unlock()
+
+				go forward_packet_udp_to_tcp(ctx, conn, remoteConn, remotePacket, localAddr)
+				go forward_packet_tcp_to_udp(conn, remotePacket, laddr)
+			}
+		}
+	}
+}
+
+func forward_packet_tcp_to_udp(udpConn *net.UDPConn, remotePacket *common.UdpPacket, laddr *net.UDPAddr) {
+	n, err := udpConn.WriteToUDP(remotePacket.Payload, laddr)
+	if err != nil {
+		fmt.Println("forward_packet_tcp_to_udp udpConn.WriteToUDP error", err)
+		return
+	}
+	fmt.Println("forward_packet_tcp_to_udp udpConn.WriteToUDP success", n)
+}
+
+func forward_packet_udp_to_tcp(ctx context.Context, udpConn *net.UDPConn, remoteConn *common.MyTcpConn, remotePacket *common.UdpPacket, localAddr string) {
+	localUdpPacketChan := make(chan *common.UdpPacket, 32)
+
+	go func() {
+		for {
+			p := make([]byte, 8192)
+			n, addr, err := udpConn.ReadFromUDP(p)
+			if err != nil {
+				fmt.Println("forward_packet_udp_to_tcp clientUDPConn.ReadFrom error", err)
+				return
+			}
+			if addr.String() != localAddr {
+				fmt.Println("forward_packet_udp_to_tcp addr not equal, continue", localAddr, addr.String())
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case localUdpPacketChan <- &common.UdpPacket{Payload: p[:n], Addr: addr}:
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case localPacket := <-localUdpPacketChan:
+			go func() {
+				raddr, ok := remotePacket.Addr.(*common.Address)
+				if !ok {
+					fmt.Println("forward_packet_udp_to_tcp remotePacket.Addr is not common.Address")
+					return
+				}
+				n, err := remoteConn.WritePacket(localPacket.Payload, raddr)
+				if err != nil {
+					fmt.Println("forward_packet_udp_to_tcp remote.WritePacket error", err)
+					return
+				}
+
+				fmt.Println("forward_packet_udp_to_tcp remoteConn.WritePacket success", n)
+			}()
+		}
+	}
 }

@@ -238,5 +238,5 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 
 	fmt.Println("response /data/hello success", resp)
 
-	cc.data_chan <- conn
+	cc.data_chan <- common.NewMyTcpConn(conn)
 }

@@ -68,9 +68,11 @@ func (rm *RunnableManager) remove(index int) {
 	if index < 0 || index > (len-1) {
 		fmt.Println("index invalid", index)
 	}
-	rm.list = rm.list[:index]
+
 	if index < (len - 1) {
-		rm.list = append(rm.list, rm.list[index+1:]...)
+		rm.list = append(rm.list[:index], rm.list[index+1:]...)
+	} else {
+		rm.list = rm.list[:index]
 	}
 }
 
