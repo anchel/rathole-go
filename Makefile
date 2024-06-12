@@ -31,9 +31,11 @@ windows-amd64:
 	GOARCH=amd64 GOOS=windows $(GOBUILD) -o $(BUILD_DIR)/$@/$(NAME)
 
 run-server:
-	go build main.go
-	./main -server local/server.toml
+	mkdir -p build
+	go build -o build/ratholego main.go
+	./build/ratholego -server local/server.toml
 
 run-client:
-	go build main.go
-	./main -client local/client.toml
+	mkdir -p build
+	go build -o build/ratholego main.go
+	./build/ratholego -client local/client.toml
