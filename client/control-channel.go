@@ -355,7 +355,7 @@ label_for_one:
 					fmt.Println("forward_data_channel_for_udp resolveudpaddr error", err)
 					break label_for_one
 				}
-				conn, err := net.ListenUDP(network, randAddr)
+				conn, err := net.ListenUDP(network, randAddr) // todo 这里的监听地址，需要改成其他机器能访问的
 				if err != nil {
 					fmt.Println("forward_data_channel_for_udp ListenUDP fail", err)
 					break label_for_one
