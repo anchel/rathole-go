@@ -59,10 +59,10 @@ func (cc *ControlChannel) Run() {
 	}
 
 	var conn net.Conn
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 1; i++ {
 		con, err := net.Dial("tcp", cc.clientConfig.RemoteAddr)
 		if err != nil {
-			fmt.Println("server connect fail", err)
+			fmt.Println("connect server fail", err)
 			continue
 		} else {
 			conn = con

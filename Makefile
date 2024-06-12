@@ -29,3 +29,11 @@ linux-arm64:
 windows-amd64:
 	mkdir -p $(BUILD_DIR)/$@
 	GOARCH=amd64 GOOS=windows $(GOBUILD) -o $(BUILD_DIR)/$@/$(NAME)
+
+run-server:
+	go build main.go
+	./main -server local/server.toml
+
+run-client:
+	go build main.go
+	./main -client local/client.toml
