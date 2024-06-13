@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anchel/rathole-go/config"
 	"github.com/anchel/rathole-go/internal/common"
+	"github.com/anchel/rathole-go/internal/config"
 )
 
 type ControlChannel struct {
@@ -228,7 +228,10 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 
 	defer func() {
 		fmt.Println("datachannel conn.Close")
-		conn.Close() // 关闭连接
+		err := conn.Close() // 关闭连接
+		if err != nil {
+			fmt.Println("datachannel conn.Close error", err)
+		}
 	}()
 
 	myconn := common.NewMyTcpConn(conn)
@@ -294,10 +297,13 @@ func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpC
 	}
 	defer func() {
 		fmt.Println("forward_data_channel_for_tcp clientConn.Close()")
-		clientConn.Close()
+		err := clientConn.Close()
+		if err != nil {
+			fmt.Println("forward_data_channel_for_tcp clientConn.Close error", err)
+		}
 	}()
 
-	fmt.Println("forward_data_channel_for_tcp, clientConn.LocalAddr", clientConn.LocalAddr())
+	fmt.Println("forward_data_channel_for_tcp, clientConn.LocalAddr", clientConn.LocalAddr(), clientConn.RemoteAddr())
 
 	err = common.CopyTcpConnection(ctx, clientConn, remoteConn)
 	if err != nil {

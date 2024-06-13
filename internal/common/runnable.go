@@ -55,6 +55,8 @@ func (rm *RunnableManager) Put(key1 string, key2 string, item Runnable) {
 }
 
 func (rm *RunnableManager) Get(key1 string, key2 string) Runnable {
+	rm.Lock()
+	defer rm.Unlock()
 	var r Runnable
 	_, findItem := rm.get(key1, key2)
 	if findItem != nil {

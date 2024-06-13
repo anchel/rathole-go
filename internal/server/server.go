@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anchel/rathole-go/config"
 	"github.com/anchel/rathole-go/internal/common"
+	"github.com/anchel/rathole-go/internal/config"
 )
 
 type Digest string

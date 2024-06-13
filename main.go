@@ -6,9 +6,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/anchel/rathole-go/client"
+	"github.com/anchel/rathole-go/internal/client"
 	"github.com/anchel/rathole-go/internal/common"
-	"github.com/anchel/rathole-go/server"
+	"github.com/anchel/rathole-go/internal/server"
 )
 
 func main() {

@@ -13,7 +13,7 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
-	"github.com/anchel/rathole-go/config"
+	"github.com/anchel/rathole-go/internal/config"
 )
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -135,19 +135,26 @@ label_for:
 		case e1 := <-chan_remote_to_local:
 			err1 = e1
 			errCount++
-			if e := dst.CloseWrite(); e != nil {
-				fmt.Println("remote to local, CloseWrite local error", e)
+
+			if e1 == nil { // 只有正常情况下，才关闭另一方的写
+				if e := dst.CloseWrite(); e != nil {
+					fmt.Println("remote to local normal end, CloseWrite local error", e)
+				}
 			}
+
 			if errCount >= 2 {
 				break label_for
 			}
 		case e2 := <-chan_local_to_remote:
 			err2 = e2
 			errCount++
-			e := src.CloseWrite()
-			if e != nil {
-				fmt.Println("local to remote, CloseWrite remote error", e)
+
+			if e2 == nil { // 只有正常情况下，才关闭另一方的写
+				if e := src.CloseWrite(); e != nil {
+					fmt.Println("local to remote normal end, CloseWrite remote error", e)
+				}
 			}
+
 			if errCount >= 2 {
 				break label_for
 			}
