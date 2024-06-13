@@ -2,14 +2,13 @@ package common
 
 import (
 	"fmt"
-	"net"
 	"sync"
 	"time"
 )
 
 type Runnable interface {
 	Close()
-	Run(net.Conn)
+	Run()
 }
 
 type RunnableItem struct {

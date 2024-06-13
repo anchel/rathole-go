@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/anchel/rathole-go/internal/common"
@@ -17,22 +19,33 @@ type ControlChannel struct {
 	clientConfig *config.ServerConfig
 	service      *Service
 	s            *Server
-	data_chan    chan net.Conn
-	cancelCtx    context.Context
-	cancel       context.CancelFunc
-	err          error
+
+	connection *net.TCPConn
+	reader     *bufio.Reader
+	data_chan  chan net.Conn
+
+	cancelCtx context.Context
+	cancel    context.CancelFunc
+	err       error
+
+	muDone   sync.Mutex
+	canceled bool
 }
 
-func NewControlChannel(parentCtx context.Context, session_key string, conf *config.ServerConfig, service *Service, s *Server) *ControlChannel {
+func NewControlChannel(parentCtx context.Context, session_key string, conf *config.ServerConfig, service *Service, s *Server, conn *net.TCPConn, reader *bufio.Reader) *ControlChannel {
 	ctx, cancel := context.WithCancel(parentCtx)
 	cc := &ControlChannel{
 		session_key:  session_key,
 		clientConfig: conf,
 		service:      service,
 		s:            s,
-		data_chan:    make(chan net.Conn, 6),
-		cancelCtx:    ctx,
-		cancel:       cancel,
+
+		connection: conn,
+		reader:     reader,
+		data_chan:  make(chan net.Conn, 6),
+
+		cancelCtx: ctx,
+		cancel:    cancel,
 	}
 
 	return cc
@@ -41,10 +54,21 @@ func NewControlChannel(parentCtx context.Context, session_key string, conf *conf
 func (cc *ControlChannel) Close() {
 	fmt.Println("ControlCancel Close")
 	cc.err = errors.New("server cc close")
-	cc.cancel()
+	cc.Cancel()
 }
 
-func (cc *ControlChannel) Run(conn net.Conn) {
+func (cc *ControlChannel) Cancel() {
+	cc.muDone.Lock()
+	defer cc.muDone.Unlock()
+	if !cc.canceled {
+		cc.canceled = true
+		cc.cancel()
+	}
+}
+
+func (cc *ControlChannel) Run() {
+	defer cc.Cancel()
+
 	data_req_chan := make(chan bool, 6)
 
 	if cc.service.svcType == config.TCP {
@@ -53,22 +77,84 @@ func (cc *ControlChannel) Run(conn net.Conn) {
 		go run_udp_loop(cc, data_req_chan)
 	}
 
+	cmd_chan, err_chan := cc.do_read_cmd()
+
+	go cc.do_send_heartbeat_to_client()
+	go cc.do_send_create_datachannel(data_req_chan)
+
 label_for:
 	for {
-		timerHeartbeat := time.After(20 * time.Second)
 		if cc.err != nil {
 			fmt.Println("cc for loop: cc.err != nil, break")
 			break
 		}
 		select {
 		case <-cc.cancelCtx.Done():
-			fmt.Println("ControlChannel receive cancel")
+			fmt.Println("cc receive cancelCtx.Done()")
 			break label_for
-		case <-data_req_chan:
-			fmt.Println("start send /contro/cmd datachannel")
-			if cc.err != nil {
-				continue label_for
+
+		case <-err_chan:
+			fmt.Println("cc <-err_chan error")
+			break label_for
+
+		case cmd := <-cmd_chan:
+			if cmd == "heartbeat" {
+				fmt.Println("cc recv client heartbeat")
+			} else {
+				fmt.Println("cc recv client other cmd", cmd)
 			}
+
+		case <-time.After(120 * time.Second):
+			fmt.Println("cc recv client heartbeat timeout")
+			break label_for
+		}
+	}
+
+	fmt.Println("cc Run Over")
+}
+
+func (cc *ControlChannel) do_read_cmd() (chan string, chan error) {
+
+	cmd_chan := make(chan string, 1)
+	err_chan := make(chan error, 1)
+
+	go func() {
+		for {
+			resp, err := http.ReadResponse(cc.reader, nil)
+			if err != nil {
+				select {
+				case <-cc.cancelCtx.Done():
+					fmt.Println("cc recv client /control/cmd fail, cancelCtx.Done()")
+				default:
+					fmt.Println("cc recv client /control/cmd fail", err)
+				}
+
+				select {
+				case <-cc.cancelCtx.Done():
+					return
+				case err_chan <- err:
+				}
+
+				return
+			}
+			select {
+			case <-cc.cancelCtx.Done():
+				return
+			case cmd_chan <- resp.Header.Get("cmd"):
+			}
+		}
+	}()
+
+	return cmd_chan, err_chan
+}
+
+func (cc *ControlChannel) do_send_create_datachannel(data_req_chan chan bool) {
+	for {
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case <-data_req_chan:
+			fmt.Println("cc start send to client /contro/cmd datachannel")
 			go func() {
 				resp := &http.Response{
 					Status:     "200 OK",
@@ -76,16 +162,25 @@ label_for:
 					Header:     make(map[string][]string),
 				}
 				resp.Header.Set("cmd", "datachannel")
-				cc.err = common.ResponseWriteWithBuffered(resp, conn)
+				cc.err = common.ResponseWriteWithBuffered(resp, cc.connection)
 				if cc.err != nil {
-					fmt.Println("send /control/cmd datachannel fail", cc.err)
-					cc.cancel()
+					fmt.Println("cc send to client /control/cmd datachannel fail", cc.err)
+					cc.Cancel()
 				}
 			}()
-		case <-timerHeartbeat:
-			fmt.Println("start send /contro/cmd heartbeat")
+		}
+	}
+}
+
+func (cc *ControlChannel) do_send_heartbeat_to_client() {
+	for {
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case <-time.After(110 * time.Second):
+			fmt.Println("cc start send to client /contro/cmd heartbeat")
 			if cc.err != nil {
-				continue label_for
+				continue
 			}
 			go func() {
 				resp := &http.Response{
@@ -94,16 +189,15 @@ label_for:
 					Header:     make(map[string][]string),
 				}
 				resp.Header.Set("cmd", "heartbeat")
-				cc.err = common.ResponseWriteWithBuffered(resp, conn)
+				cc.err = common.ResponseWriteWithBuffered(resp, cc.connection)
 				if cc.err != nil {
-					fmt.Println("send /control/cmd heartbeat fail", cc.err)
-					cc.cancel()
+					fmt.Println("cc send to client /control/cmd heartbeat fail", cc.err)
+					cc.Cancel()
 				}
 			}()
 		}
-	}
 
-	fmt.Println("ControlChannel Run Over")
+	}
 }
 
 func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool) {
@@ -123,7 +217,7 @@ func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool) {
 			if err != nil {
 				select {
 				case <-cc.cancelCtx.Done():
-					fmt.Println("service accept fail, because of cancel", err)
+					fmt.Println("service accept fail, because of cancelCtx.Done()", err)
 				default:
 					fmt.Println("service accept fail", err)
 				}

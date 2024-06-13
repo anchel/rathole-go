@@ -110,8 +110,8 @@ type ReadCloseWriter interface {
 }
 
 func CopyTcpConnection(ctx context.Context, dst ReadCloseWriter, src ReadCloseWriter) error {
-	chan_remote_to_local := make(chan error)
-	chan_local_to_remote := make(chan error)
+	chan_remote_to_local := make(chan error, 1)
+	chan_local_to_remote := make(chan error, 1)
 
 	go func() {
 		written, err := io.Copy(dst, src)
@@ -125,37 +125,38 @@ func CopyTcpConnection(ctx context.Context, dst ReadCloseWriter, src ReadCloseWr
 		chan_local_to_remote <- err
 	}()
 
+	var done1, done2 bool
 	var err1, err2 error
-	var errCount uint8 = 0
+
 label_for:
 	for {
 		select {
 		case <-ctx.Done():
 			break label_for
-		case e1 := <-chan_remote_to_local:
-			err1 = e1
-			errCount++
 
-			if e1 == nil { // 只有正常情况下，才关闭另一方的写
-				if e := dst.CloseWrite(); e != nil {
-					fmt.Println("remote to local normal end, CloseWrite local error", e)
-				}
-			}
+		case err2 = <-chan_local_to_remote:
+			done2 = true
 
-			if errCount >= 2 {
-				break label_for
-			}
-		case e2 := <-chan_local_to_remote:
-			err2 = e2
-			errCount++
-
-			if e2 == nil { // 只有正常情况下，才关闭另一方的写
+			if err2 == nil && !done1 { // 只有正常情况下，才关闭另一方的写，但是这里也可能会有问题，假如dst也已经关闭了，此时就会报错
 				if e := src.CloseWrite(); e != nil {
 					fmt.Println("local to remote normal end, CloseWrite remote error", e)
 				}
 			}
 
-			if errCount >= 2 {
+			if done1 && done2 {
+				break label_for
+			}
+
+		case err1 = <-chan_remote_to_local:
+			done1 = true
+
+			if err1 == nil && !done2 { // 只有正常情况下，才关闭另一方的写，但是这里也可能会有问题，假如dst也已经关闭了，此时就会报错
+				if e := dst.CloseWrite(); e != nil {
+					fmt.Println("remote to local normal end, CloseWrite local error", e)
+				}
+			}
+
+			if done1 && done2 {
 				break label_for
 			}
 		}

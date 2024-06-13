@@ -30,6 +30,9 @@ type Server struct {
 	mu                    sync.Mutex
 	cancelCtx             context.Context
 	cancel                context.CancelFunc
+
+	muDone   sync.Mutex
+	canceled bool
 }
 
 func NewServer(c *config.ServerConfig) *Server {
@@ -61,6 +64,15 @@ func (s *Server) init() {
 	}
 }
 
+func (s *Server) Cancel() {
+	s.muDone.Lock()
+	defer s.muDone.Unlock()
+	if !s.canceled {
+		s.canceled = true
+		s.cancel()
+	}
+}
+
 func (s *Server) acceptLoop(sigChan chan os.Signal) {
 
 	go func() {
@@ -85,12 +97,12 @@ func (s *Server) acceptLoop(sigChan chan os.Signal) {
 label_for:
 	for {
 		select {
+		case <-s.cancelCtx.Done():
+			fmt.Println("server receive s.cancelCtx.Done()")
+			break label_for
 		case cc := <-sigChan:
 			fmt.Println("server receive interrupt", cc)
-			s.cancel()
-		case <-s.cancelCtx.Done():
-			fmt.Println("server receive cancel")
-			break label_for
+			s.Cancel()
 		}
 	}
 	time.Sleep(10 * time.Millisecond)
@@ -98,8 +110,8 @@ label_for:
 }
 
 func serveConnection(s *Server, conn *net.TCPConn) {
-
-	req, err := http.ReadRequest(bufio.NewReader(conn))
+	reader := bufio.NewReader(conn)
+	req, err := http.ReadRequest(reader)
 	if err != nil {
 		fmt.Println("recv hello cmd fail", err)
 		return
@@ -107,13 +119,13 @@ func serveConnection(s *Server, conn *net.TCPConn) {
 	uri := req.URL.Path
 	switch uri {
 	case "/control/hello":
-		do_control_channel_handshake(s, conn, req)
+		do_control_channel_handshake(s, conn, reader, req)
 	case "/data/hello":
 		do_data_channel_handshake(s, conn, req)
 	}
 }
 
-func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) {
+func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Reader, req *http.Request) {
 	defer conn.Close()
 
 	serviceDigest := req.Header.Get("service")
@@ -153,7 +165,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 		return
 	}
 
-	req, err = http.ReadRequest(bufio.NewReader(conn))
+	req, err = http.ReadRequest(reader)
 	if err != nil {
 		fmt.Println("recv hello auth fail", err)
 		return
@@ -190,19 +202,17 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, req *http.Reques
 		return
 	}
 
-	cc := NewControlChannel(s.cancelCtx, session_key, s.config, service, s)
+	cc := NewControlChannel(s.cancelCtx, session_key, s.config, service, s, conn, reader)
 
 	s.controlChannelManager.Put(serviceDigest, session_key, cc)
 
-	cc.Run(conn)
+	cc.Run()
 }
 
 func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) {
 	sessionKey := req.Header.Get("session_key")
 
 	r := s.controlChannelManager.Get("", sessionKey)
-
-	resp := common.ResponseDataHello{Ok: false, Typ: ""}
 
 	var respbuf [2]byte = [2]byte{0, 0}
 
@@ -236,7 +246,7 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 		return
 	}
 
-	fmt.Println("response /data/hello success", resp)
+	fmt.Println("response /data/hello success", respbuf)
 
 	cc.data_chan <- common.NewMyTcpConn(conn)
 }
