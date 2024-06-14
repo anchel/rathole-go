@@ -414,5 +414,5 @@ func WriteFile(p []byte) {
 
 type UdpPacket struct {
 	Payload []byte
-	Addr    net.Addr
+	Addr    *Address
 }
