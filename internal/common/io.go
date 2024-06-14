@@ -291,7 +291,7 @@ func (a *Address) ReadFromReader(r io.Reader) error {
 	byteBuf := [1]byte{}
 	_, err := io.ReadFull(r, byteBuf[:])
 	if err != nil {
-		return errors.New("unable to read ATYP")
+		return errors.New("unable to read ATYP" + err.Error())
 	}
 	a.AddressType = AddressType(byteBuf[0])
 	switch a.AddressType {

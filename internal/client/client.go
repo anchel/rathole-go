@@ -62,6 +62,7 @@ label_for:
 
 		case sig := <-sigChan:
 			fmt.Println("client receive interrupt", sig)
+			client.cancel()
 			break label_for
 		}
 	}
