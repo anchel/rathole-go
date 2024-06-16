@@ -152,7 +152,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		return
 	}
 	nonce := common.RandStringRunes(16)
-	fmt.Println("nonce", nonce)
+	// fmt.Println("nonce", nonce)
 	resp := &http.Response{
 		Status:     "200 OK",
 		StatusCode: http.StatusOK,
@@ -248,5 +248,9 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 
 	fmt.Println("response /data/hello success", respbuf)
 
-	cc.data_chan <- common.NewMyTcpConn(conn)
+	select {
+	case <-s.cancelCtx.Done():
+	case <-cc.cancelCtx.Done():
+	case cc.data_chan <- common.NewMyTcpConn(conn):
+	}
 }

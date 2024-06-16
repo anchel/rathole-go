@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 
@@ -186,4 +187,115 @@ func DiscardRewindConn(rconn *RewindConn, resp *http.Response) error {
 		return fmt.Errorf("discard n not equal, %d, %d", n, buf.Len())
 	}
 	return nil
+}
+
+func Do_control_channel_handshake(conn net.Conn, br *bufio.Reader, svcName string, token string) (string, error) {
+
+	digest := CalSha256(svcName)
+	fmt.Println("digest", digest)
+	req, err := http.NewRequest("GET", "/control/hello", nil)
+	if err != nil {
+		fmt.Println("cc create request /control/hello fail", err)
+		return "", err
+	}
+	req.Header.Set("service", digest)
+	err = req.Write(conn)
+	if err != nil {
+		fmt.Println("cc send request /control/hello fail", err)
+		return "", err
+	}
+	fmt.Println("cc send request /control/hello success")
+
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		fmt.Println("cc recv response /control/hello fail", err)
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("cc recv response /control/hello not ok", resp.StatusCode)
+		return "", errors.New("cc recv response /control/hello not ok")
+	}
+	nonce := resp.Header.Get("nonce")
+	if nonce == "" {
+		fmt.Println("cc recv response /control/hello not ok, no nonce")
+		return "", errors.New("cc recv response /control/hello not ok, no nonce")
+	}
+
+	session_key := CalSha256(token + nonce)
+	req, err = http.NewRequest("GET", "/control/auth", nil)
+	if err != nil {
+		fmt.Println("cc create request /control/auth fail", err)
+		return "", err
+	}
+	req.Header.Set("session_key", session_key)
+
+	err = req.Write(conn)
+	if err != nil {
+		fmt.Println("cc send request /control/auth fail", err)
+		return "", err
+	}
+	fmt.Println("cc send request /control/auth success")
+
+	resp, err = http.ReadResponse(br, nil)
+	if err != nil {
+		fmt.Println("cc recv response /control/auth fail", err)
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK { // 401-token不正确，拒绝访问
+		fmt.Println("cc recv response /control/auth not ok", resp.StatusCode, session_key)
+		return "", err
+	}
+
+	return session_key, nil
+}
+
+func Do_data_channel_handshake(conn net.Conn, sessionKey string, svcType config.ServiceType) (string, error) {
+	req, err := http.NewRequest("GET", "/data/hello", nil)
+	if err != nil {
+		fmt.Println("datachannel create request /data/hello fail", err)
+		return "", err
+	}
+	req.Header.Set("session_key", sessionKey)
+	err = req.Write(conn)
+	if err != nil {
+		fmt.Println("datachannel send request /data/hello fail", err)
+		return "", err
+	}
+	fmt.Println("datachannel send request /data/hello success")
+
+	respbuf := [...]byte{0, 0}
+	_, err = io.ReadFull(conn, respbuf[:])
+	if err != nil {
+		fmt.Println("datachannel recv response /data/hello fail", err)
+		return "", err
+	}
+
+	if respbuf[0] != 1 {
+		fmt.Println("datachannel recv response /data/hello not ok", respbuf)
+		return "", errors.New("recv response /data/hello not ok")
+	}
+
+	forwardType := config.ServiceType("")
+	switch respbuf[1] {
+	case 1:
+		forwardType = config.TCP
+	case 2:
+		forwardType = config.UDP
+	}
+
+	if forwardType != svcType {
+		fmt.Println("datachannel forward type not equal", forwardType, svcType)
+		return "", errors.New("forward type not equal")
+	}
+
+	return string(forwardType), nil
+}
+
+func SendError(ctx context.Context, err_chan chan error, err error) {
+	select {
+	case <-ctx.Done():
+	case err_chan <- err:
+	}
 }

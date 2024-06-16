@@ -3,7 +3,6 @@ package server
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,9 +28,8 @@ type ControlChannel struct {
 
 	cancelCtx context.Context
 	cancel    context.CancelFunc
-	err       error
 
-	muDone   sync.Mutex
+	muCancel sync.Mutex
 	canceled bool
 }
 
@@ -57,13 +55,12 @@ func NewControlChannel(parentCtx context.Context, session_key string, conf *conf
 
 func (cc *ControlChannel) Close() {
 	fmt.Println("ControlCancel Close")
-	cc.err = errors.New("server cc close")
 	cc.Cancel()
 }
 
 func (cc *ControlChannel) Cancel() {
-	cc.muDone.Lock()
-	defer cc.muDone.Unlock()
+	cc.muCancel.Lock()
+	defer cc.muCancel.Unlock()
 	if !cc.canceled {
 		cc.canceled = true
 		cc.cancel()
@@ -75,28 +72,37 @@ func (cc *ControlChannel) Run() {
 		fmt.Println("cc Run end")
 	}()
 
+	defer func() {
+		err := cc.connection.Close()
+		if err != nil {
+			fmt.Println("cc cc.connection.Close error", err)
+		}
+	}()
+
+	if cc.canceled {
+		fmt.Println("cc Run stop, because of canceled")
+		return
+	}
+
 	defer cc.Cancel()
 
-	data_req_chan := make(chan bool, 6)
+	cmd_chan := make(chan string, 1)
+	err_chan := make(chan error, 1)
+	datachannel_req_chan := make(chan bool, 6)
 
-	cmd_chan, err_chan := cc.do_read_cmd()
+	go cc.do_read_cmd(cmd_chan, err_chan)
 
-	go cc.do_send_heartbeat_to_client()
-	go cc.do_send_create_datachannel(data_req_chan)
+	go cc.do_send_heartbeat_to_client(err_chan)
+	go cc.do_send_create_datachannel(datachannel_req_chan, err_chan)
 
 	if cc.service.svcType == config.TCP {
-		go run_tcp_loop(cc, data_req_chan, err_chan)
+		go run_tcp_loop(cc, datachannel_req_chan, err_chan)
 	} else {
-		go run_udp_loop(cc, data_req_chan, err_chan)
+		go run_udp_loop(cc, datachannel_req_chan, err_chan)
 	}
 
 label_for:
 	for {
-		if cc.err != nil {
-			fmt.Println("cc for loop: cc.err != nil, break")
-			break
-		}
-
 		select {
 		case <-cc.cancelCtx.Done():
 			fmt.Println("cc receive cancelCtx.Done()")
@@ -122,46 +128,32 @@ label_for:
 	fmt.Println("cc Run Over")
 }
 
-func (cc *ControlChannel) do_read_cmd() (chan string, chan error) {
-
-	cmd_chan := make(chan string, 1)
-	err_chan := make(chan error, 1)
-
-	go func() {
-		defer func() {
-			fmt.Println("cc do_read_cmd end")
-		}()
-
-		for {
-			resp, err := http.ReadResponse(cc.reader, nil)
-			if err != nil {
-				select {
-				case <-cc.cancelCtx.Done():
-					fmt.Println("cc recv client /control/cmd fail, cancelCtx.Done()")
-				default:
-					fmt.Println("cc recv client /control/cmd fail", err)
-				}
-
-				select {
-				case <-cc.cancelCtx.Done():
-					return
-				case err_chan <- err:
-				}
-
-				return
-			}
-			select {
-			case <-cc.cancelCtx.Done():
-				return
-			case cmd_chan <- resp.Header.Get("cmd"):
-			}
-		}
+func (cc *ControlChannel) do_read_cmd(cmd_chan chan string, err_chan chan error) {
+	defer func() {
+		fmt.Println("cc do_read_cmd end")
 	}()
 
-	return cmd_chan, err_chan
+	for {
+		resp, err := http.ReadResponse(cc.reader, nil)
+		if err != nil {
+			select {
+			case <-cc.cancelCtx.Done():
+				fmt.Println("cc recv client /control/cmd fail, cancelCtx.Done()")
+			default:
+				fmt.Println("cc recv client /control/cmd fail", err)
+			}
+			common.SendError(cc.cancelCtx, err_chan, err)
+			return
+		}
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case cmd_chan <- resp.Header.Get("cmd"):
+		}
+	}
 }
 
-func (cc *ControlChannel) do_send_create_datachannel(data_req_chan chan bool) {
+func (cc *ControlChannel) do_send_create_datachannel(datachannel_req_chan chan bool, err_chan chan error) {
 	defer func() {
 		fmt.Println("cc do_send_create_datachannel end")
 	}()
@@ -170,62 +162,56 @@ func (cc *ControlChannel) do_send_create_datachannel(data_req_chan chan bool) {
 		select {
 		case <-cc.cancelCtx.Done():
 			return
-		case <-data_req_chan:
+		case <-datachannel_req_chan:
 			fmt.Println("cc start send to client /contro/cmd datachannel")
-			go func() {
-				resp := &http.Response{
-					Status:     "200 OK",
-					StatusCode: http.StatusOK,
-					Header:     make(map[string][]string),
-				}
-				resp.Header.Set("cmd", "datachannel")
-				cc.err = common.ResponseWriteWithBuffered(resp, cc.connection)
-				if cc.err != nil {
-					fmt.Println("cc send to client /control/cmd datachannel fail", cc.err)
-					cc.Cancel()
-				}
-			}()
+			resp := &http.Response{
+				Status:     "200 OK",
+				StatusCode: http.StatusOK,
+				Header:     make(map[string][]string),
+			}
+			resp.Header.Set("cmd", "datachannel")
+			err := common.ResponseWriteWithBuffered(resp, cc.connection)
+			if err != nil {
+				fmt.Println("cc send to client /control/cmd datachannel fail", err)
+				common.SendError(cc.cancelCtx, err_chan, err)
+				return
+			}
 		}
 	}
 }
 
-func (cc *ControlChannel) do_send_heartbeat_to_client() {
+func (cc *ControlChannel) do_send_heartbeat_to_client(err_chan chan error) {
 	for {
 		select {
 		case <-cc.cancelCtx.Done():
 			return
 		case <-time.After(110 * time.Second):
 			fmt.Println("cc start send to client /contro/cmd heartbeat")
-			if cc.err != nil {
-				continue
+			resp := &http.Response{
+				Status:     "200 OK",
+				StatusCode: http.StatusOK,
+				Header:     make(map[string][]string),
 			}
-			go func() {
-				resp := &http.Response{
-					Status:     "200 OK",
-					StatusCode: http.StatusOK,
-					Header:     make(map[string][]string),
-				}
-				resp.Header.Set("cmd", "heartbeat")
-				cc.err = common.ResponseWriteWithBuffered(resp, cc.connection)
-				if cc.err != nil {
-					fmt.Println("cc send to client /control/cmd heartbeat fail", cc.err)
-					cc.Cancel()
-				}
-			}()
+			resp.Header.Set("cmd", "heartbeat")
+			err := common.ResponseWriteWithBuffered(resp, cc.connection)
+			if err != nil {
+				fmt.Println("cc send to client /control/cmd heartbeat fail", err)
+				common.SendError(cc.cancelCtx, err_chan, err)
+				return
+			}
 		}
-
 	}
 }
 
-func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan error) {
+func run_tcp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan chan error) {
 	fmt.Println("cc run_tcp_loop start")
 
 	defer func() {
 		fmt.Println("cc run_tcp_loop end")
 	}()
 
-	if cc.err != nil {
-		fmt.Println("cc run_tcp_loop cc.err != nil, run_tcp_loop stop")
+	if cc.canceled {
+		fmt.Println("cc run_tcp_loop stop, because of canceled")
 		return
 	}
 	tcpAddr, _ := net.ResolveTCPAddr("tcp", cc.service.bind_addr)
@@ -256,7 +242,7 @@ func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan e
 				}
 				return
 			}
-			go forward_tcp_connection(cc, remoteConn, data_req_chan)
+			go forward_tcp_connection(cc, remoteConn, datachannel_req_chan)
 		}
 	}()
 
@@ -268,7 +254,7 @@ func run_tcp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan e
 	}
 }
 
-func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_req_chan chan<- bool) {
+func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, datachannel_req_chan chan<- bool) {
 	// defer remoteConn.Close()
 
 	fmt.Println("forward_tcp_connection", remoteConn.RemoteAddr())
@@ -277,7 +263,7 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_re
 	go func() {
 		select {
 		case <-cc.cancelCtx.Done():
-		case data_req_chan <- true:
+		case datachannel_req_chan <- true:
 		}
 	}()
 
@@ -305,15 +291,15 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, data_re
 	}
 }
 
-func run_udp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan error) {
+func run_udp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan chan error) {
 	fmt.Println("cc run_udp_loop start")
 
 	defer func() {
 		fmt.Println("cc run_udp_loop end")
 	}()
 
-	if cc.err != nil {
-		fmt.Println("cc cc.err != nil, run_udp_loop stop")
+	if cc.canceled {
+		fmt.Println("cc run_udp_loop stop, because of canceled")
 		return
 	}
 
@@ -322,12 +308,14 @@ func run_udp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan e
 	laddr, err := net.ResolveUDPAddr(network, cc.service.bind_addr)
 	if err != nil {
 		fmt.Println("cc run_udp_loop laddr error", err)
+		common.SendError(cc.cancelCtx, err_chan, err)
 		return
 	}
 
 	localUDPConn, err := net.ListenUDP(network, laddr)
 	if err != nil {
 		fmt.Println("cc run_udp_loop ListenUDP error", err)
+		common.SendError(cc.cancelCtx, err_chan, err)
 		return
 	}
 
@@ -343,7 +331,6 @@ func run_udp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan e
 
 	incomingPacketChan := make(chan *common.UdpPacket, 32)  // udp 接收到的包
 	outcomingPacketChan := make(chan *common.UdpPacket, 32) // tcp 接收到的包
-	// err_chan := make(chan error, 3)
 
 	go forward_udp_in_and_out(cc, localUDPConn, incomingPacketChan, outcomingPacketChan, err_chan)
 
@@ -363,14 +350,13 @@ func run_udp_loop(cc *ControlChannel, data_req_chan chan<- bool, err_chan chan e
 		}
 	}()
 
-label_for_second:
 	for {
 		var tmpInboundUdpPacketChan chan *common.UdpPacket
 
-		if tmpClientTCPConnChan != nil { // 正在获取客户端连接，此时应该暂停处理udp包
+		if tmpClientTCPConnChan != nil { // 正在获取客户端连接，此时应该暂停读取通道里的udp包
 			tmpInboundUdpPacketChan = nil
 		} else {
-			if clientTCPConn != nil { // 如果客户端连接不为空，则也应该暂停处理，因为客户端连接会自动处理了
+			if clientTCPConn != nil { // 如果客户端连接不为空，则也应该暂停处理，因为通道已经移交给clientTCPConn
 				tmpInboundUdpPacketChan = nil
 			} else {
 				tmpInboundUdpPacketChan = incomingPacketChan
@@ -379,10 +365,10 @@ label_for_second:
 
 		select {
 		case <-cc.cancelCtx.Done():
-			break label_for_second
+			return
 
 		case <-err_chan:
-			break label_for_second
+			return
 
 		case ctc := <-tmpClientTCPConnChan:
 			fmt.Println("cc run_udp_loop <-tmpClientTCPConnChan, LocalAddr:", ctc.LocalAddr(), "RemoteAddr:", ctc.RemoteAddr())
@@ -395,8 +381,8 @@ label_for_second:
 				tmpUdpPacket = &up2
 				inboundUdpPacket = nil
 			}
-			go write_packet_to_tcpconn(cc, clientTCPConn, incomingPacketChan, tmpUdpPacket, err_chan)
-			go read_packet_from_tcpconn(cc, clientTCPConn, outcomingPacketChan, err_chan)
+			go write_packet_to_tcpconn(cc.cancelCtx, clientTCPConn, incomingPacketChan, tmpUdpPacket, err_chan)
+			go read_packet_from_tcpconn(cc.cancelCtx, clientTCPConn, outcomingPacketChan, err_chan)
 
 		case inboundUdpPacket = <-tmpInboundUdpPacketChan:
 			fmt.Println("cc run_udp_loop <-tmpInboundUdpPacketChan")
@@ -404,29 +390,17 @@ label_for_second:
 				fmt.Println("cc run_udp_loop clientTCPConn == nil, send to client create datachannel")
 				tmpClientTCPConnChan = make(chan *common.MyTcpConn)
 				go func() {
-					select {
-					case <-cc.cancelCtx.Done():
-						return
-					case data_req_chan <- true:
-					}
-
-					var tmpConn *common.MyTcpConn
-					var ok bool
-					select {
-					case <-cc.cancelCtx.Done():
-						return
-					case conn := <-cc.data_chan:
-						tmpConn, ok = conn.(*common.MyTcpConn)
-						if !ok {
-							fmt.Println("cc run_udp_loop 获取的客户的连接不是tcp连接")
+					retConn := acquire_data_channel(cc, datachannel_req_chan)
+					if retConn != nil {
+						select {
+						case <-cc.cancelCtx.Done():
 							return
+						case tmpClientTCPConnChan <- retConn:
 						}
-					}
-
-					select {
-					case <-cc.cancelCtx.Done():
+					} else {
+						fmt.Println("cc run_udp_loop acquire_data_channel fail")
+						common.SendError(cc.cancelCtx, err_chan, err)
 						return
-					case tmpClientTCPConnChan <- tmpConn:
 					}
 				}()
 			}
@@ -434,112 +408,139 @@ label_for_second:
 	}
 }
 
+func acquire_data_channel(cc *ControlChannel, datachannel_req_chan chan<- bool) *common.MyTcpConn {
+	local_data_chan := make(chan *common.MyTcpConn)
+	go func() {
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case datachannel_req_chan <- true:
+		}
+
+		var tmpConn *common.MyTcpConn
+		var ok bool
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case conn := <-cc.data_chan:
+			tmpConn, ok = conn.(*common.MyTcpConn)
+			if !ok {
+				fmt.Println("cc run_udp_loop 获取的客户的连接不是tcp连接")
+				return
+			}
+		}
+
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case local_data_chan <- tmpConn:
+		}
+	}()
+
+	select {
+	case <-cc.cancelCtx.Done():
+		return nil
+	case conn := <-local_data_chan:
+		return conn
+	case <-time.After(6 * time.Second):
+		return nil
+	}
+}
+
 func forward_udp_in_and_out(cc *ControlChannel, udpConn *net.UDPConn, inboundChan chan *common.UdpPacket, outboundChan chan *common.UdpPacket, err_chan chan error) {
 	network := string(cc.service.svcType)
 
+	local_err_chan := make(chan error, 3)
 	go func() {
 		for {
 			payload := make([]byte, 8192)
 			n, addr, err := udpConn.ReadFromUDP(payload)
 			if err != nil {
 				fmt.Println("datachannel run_udp_loop ReadFromUDP error", err)
-				select {
-				case <-cc.cancelCtx.Done():
-				case err_chan <- err:
-				}
+				common.SendError(cc.cancelCtx, local_err_chan, err)
 				return
 			}
 			fmt.Println("datachannel run_udp_loop ReadFromUDP", n, "packet.Addr:", addr)
 			address, err := common.NewAddressFromAddr(network, addr.String())
 			if err != nil {
 				fmt.Println("datachannel run_udp_loop NewAddressFromAddr error", addr, err)
-				select {
-				case <-cc.cancelCtx.Done():
-				case err_chan <- err:
-				}
+				common.SendError(cc.cancelCtx, local_err_chan, err)
 				return
 			}
 			select {
 			case <-cc.cancelCtx.Done():
+				return
 			case inboundChan <- &common.UdpPacket{Payload: payload[:n], Addr: address}:
 			}
 		}
 	}()
 
-label_for_outer:
 	for {
 		select {
 		case <-cc.cancelCtx.Done():
 			return
 
-		case <-err_chan:
+		case err := <-local_err_chan:
+			common.SendError(cc.cancelCtx, err_chan, err)
 			return
 
 		case packet := <-outboundChan:
-			fmt.Println("datachannel forward_udp_in_and_out <-outboundChan")
+			// fmt.Println("datachannel forward_udp_in_and_out <-outboundChan")
 			addr, err := net.ResolveUDPAddr(packet.Addr.Network(), packet.Addr.String())
 			if err != nil {
 				fmt.Println("datachannel forward_udp_in_and_out ResolveUDPAddr error", err, packet)
-				continue label_for_outer
+				common.SendError(cc.cancelCtx, err_chan, err) // 这里是否有必要发送错误来终止controlchannel
+				return
 			}
 			n, err := udpConn.WriteToUDP(packet.Payload, addr)
 			if err != nil {
-				fmt.Println("datachannel forward_udp_in_and_out WriteToUDP error", err)
+				fmt.Println("datachannel forward_udp_in_and_out WriteToUDP error", addr, err)
+				common.SendError(cc.cancelCtx, err_chan, err) // 这里是否有必要发送错误来终止controlchannel
+				return
 			} else {
-				fmt.Println("datachannel forward_udp_in_and_out WriteToUDP success", n)
+				fmt.Println("datachannel forward_udp_in_and_out WriteToUDP success", n, addr)
 			}
 		}
-
 	}
 }
 
-func read_packet_from_tcpconn(cc *ControlChannel, tcpConn *common.MyTcpConn, outboundChan chan *common.UdpPacket, err_chan chan error) {
+func read_packet_from_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, outboundChan chan *common.UdpPacket, err_chan chan error) {
 	for {
 		payload := make([]byte, 8192)
 		addr, n, err := tcpConn.ReadPacket(payload)
 		if err != nil {
 			fmt.Println("datachannel read_packet_from_tcpconn ReadPacket error", err)
-			select {
-			case <-cc.cancelCtx.Done():
-			case err_chan <- err:
-			}
+			common.SendError(ctx, err_chan, err)
 			return
 		}
 		fmt.Println("datachannel read_packet_from_tcpconn clientTCPConn.ReadPacket", n, "packet.Addr:", addr)
 		select {
-		case <-cc.cancelCtx.Done():
+		case <-ctx.Done():
 			return
 		case outboundChan <- &common.UdpPacket{Payload: payload[:n], Addr: addr}:
 		}
 	}
 }
 
-func write_packet_to_tcpconn(cc *ControlChannel, tcpConn *common.MyTcpConn, incomingPacketChan chan *common.UdpPacket, udpPacket *common.UdpPacket, err_chan chan error) {
+func write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, incomingPacketChan chan *common.UdpPacket, udpPacket *common.UdpPacket, err_chan chan error) {
 	if udpPacket != nil {
 		n, err := tcpConn.WritePacket(udpPacket.Payload, udpPacket.Addr)
 		if err != nil {
 			fmt.Println("datachannel write_packet_to_tcpconn lonely udpPacket tcpConn.WritePacket error", err)
-			select {
-			case <-cc.cancelCtx.Done():
-			case err_chan <- err:
-			}
+			common.SendError(ctx, err_chan, err)
 			return
 		}
 		fmt.Println("datachannel write_packet_to_tcpconn lonely updPacket tcpConn.WritePacket success", n)
 	}
 	for {
 		select {
-		case <-cc.cancelCtx.Done():
+		case <-ctx.Done():
 			return
 		case packet := <-incomingPacketChan:
 			n, err := tcpConn.WritePacket(packet.Payload, packet.Addr)
 			if err != nil {
 				fmt.Println("datachannel write_packet_to_tcpconn tcpConn.WritePacket error", err)
-				select {
-				case <-cc.cancelCtx.Done():
-					return
-				case err_chan <- err:
-				}
+				common.SendError(ctx, err_chan, err)
 				return
 			}
 			fmt.Println("datachannel write_packet_to_tcpconn tcpConn.WritePacket success", n)

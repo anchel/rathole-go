@@ -3,9 +3,7 @@ package client
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/internal/config"
+	"github.com/sethvargo/go-retry"
 )
 
 type ControlChannel struct {
@@ -25,9 +24,8 @@ type ControlChannel struct {
 
 	cancelCtx context.Context
 	cancel    context.CancelFunc
-	err       error
 
-	muDone   sync.Mutex
+	muCancel sync.Mutex
 	canceled bool
 }
 
@@ -51,14 +49,13 @@ func NewControlChannel(client *Client, svcName string, clientConfig *config.Clie
 }
 
 func (cc *ControlChannel) Close() {
-	fmt.Println("client cc close")
-	cc.err = errors.New("client cc close")
+	fmt.Println("cc close")
 	cc.Cancel()
 }
 
 func (cc *ControlChannel) Cancel() {
-	cc.muDone.Lock()
-	defer cc.muDone.Unlock()
+	cc.muCancel.Lock()
+	defer cc.muCancel.Unlock()
 	if !cc.canceled {
 		cc.canceled = true
 		cc.cancel()
@@ -84,20 +81,25 @@ func (cc *ControlChannel) Run() {
 	defer cc.Cancel()
 
 	var conn net.Conn
-	for i := 0; i < 1; i++ {
+
+	b := retry.NewFibonacci(1 * time.Second)
+	b = retry.WithMaxRetries(6, b)
+	err := retry.Do(cc.cancelCtx, b, func(ctx context.Context) error {
 		con, err := net.Dial("tcp", cc.clientConfig.RemoteAddr)
 		if err != nil {
 			fmt.Println("cc connect server fail", err)
-			continue
-		} else {
-			conn = con
-			break
+			return retry.RetryableError(err)
 		}
+		conn = con
+		return nil
+	})
+	if err != nil {
+		fmt.Println("cc server retry.Do fail", err)
+		return
 	}
 
 	if conn == nil {
-		fmt.Println("cc server retry fail ")
-		needReconnect = true
+		fmt.Println("cc conn is nil")
 		return
 	}
 
@@ -106,67 +108,19 @@ func (cc *ControlChannel) Run() {
 		conn.Close()
 	}()
 
-	digest := common.CalSha256(cc.svcName)
-	fmt.Println("digest", digest)
-	req, err := http.NewRequest("GET", "/control/hello", nil)
-	if err != nil {
-		fmt.Println("cc create request /control/hello fail", err)
-		return
-	}
-	req.Header.Set("service", digest)
-	err = req.Write(conn)
-	if err != nil {
-		fmt.Println("cc send request /control/hello fail", err)
-		return
-	}
-	fmt.Println("cc send request /control/hello success")
-
 	br := bufio.NewReader(conn)
 
-	resp, err := http.ReadResponse(br, nil)
+	session_key, err := common.Do_control_channel_handshake(conn, br, cc.svcName, cc.svcConfig.Token)
 	if err != nil {
-		fmt.Println("cc recv response /control/hello fail", err)
+		fmt.Println("cc Do_control_channel_handshake fail", err)
 		return
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		fmt.Println("cc recv response /control/hello not ok", resp.StatusCode)
-		return
-	}
-	nonce := resp.Header.Get("nonce")
-	if nonce == "" {
-		fmt.Println("cc recv response /control/hello not ok, no nonce")
-		return
-	}
+	cmd_chan := make(chan string, 6)
+	err_chan := make(chan error, 3)
 
-	session_key := common.CalSha256(cc.svcConfig.Token + nonce)
-	req, err = http.NewRequest("GET", "/control/auth", nil)
-	if err != nil {
-		fmt.Println("cc create request /control/auth fail", err)
-		return
-	}
-	req.Header.Set("session_key", session_key)
-
-	err = req.Write(conn)
-	if err != nil {
-		fmt.Println("cc send request /control/auth fail", err)
-		return
-	}
-	fmt.Println("cc send request /control/auth success")
-
-	resp, err = http.ReadResponse(br, nil)
-	if err != nil {
-		fmt.Println("cc recv response /control/auth fail", err)
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK { // 401-token不正确，拒绝访问
-		fmt.Println("cc recv response /control/auth not ok", resp.StatusCode, session_key)
-		return
-	}
-
-	cmd_chan, err_chan := cc.do_read_cmd(br)
-	go cc.do_send_heartbeat_to_server(conn)
+	go cc.do_read_cmd(br, cmd_chan, err_chan)
+	go cc.do_send_heartbeat_to_server(conn, err_chan)
 
 OUTER:
 	for {
@@ -202,45 +156,33 @@ OUTER:
 	}
 }
 
-func (cc *ControlChannel) do_read_cmd(br *bufio.Reader) (chan string, chan error) {
+func (cc *ControlChannel) do_read_cmd(br *bufio.Reader, cmd_chan chan string, err_chan chan error) {
 
-	cmd_chan := make(chan string, 1)
-	err_chan := make(chan error, 1)
+	defer func() {
+		fmt.Println("cc do_read_cmd for end")
+	}()
 
-	go func() {
-		defer func() {
-			fmt.Println("cc do_read_cmd for end")
-		}()
-
-		for {
-			resp, err := http.ReadResponse(br, nil)
-			if err != nil {
-				select {
-				case <-cc.cancelCtx.Done():
-					fmt.Println("cc recv server /control/cmd fail, cancelCtx.Done()")
-				default:
-					fmt.Println("cc recv server /control/cmd fail", err)
-				}
-
-				select {
-				case <-cc.cancelCtx.Done():
-					return
-				case err_chan <- err:
-				}
-
-				return
-			}
+	for {
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
 			select {
 			case <-cc.cancelCtx.Done():
-				return
-			case cmd_chan <- resp.Header.Get("cmd"):
+				fmt.Println("cc recv server /control/cmd fail, cancelCtx.Done()")
+			default:
+				fmt.Println("cc recv server /control/cmd fail", err)
 			}
+			common.SendError(cc.cancelCtx, err_chan, err)
+			return
 		}
-	}()
-	return cmd_chan, err_chan
+		select {
+		case <-cc.cancelCtx.Done():
+			return
+		case cmd_chan <- resp.Header.Get("cmd"):
+		}
+	}
 }
 
-func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn) {
+func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn, err_chan chan error) {
 	defer func() {
 		fmt.Println("cc do_send_heartbeat_to_server end")
 	}()
@@ -251,50 +193,54 @@ func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn) {
 			return
 		case <-time.After(110 * time.Second):
 			fmt.Println("cc start send to server /contro/cmd heartbeat")
-			go func() {
-				resp := &http.Response{
-					Status:     "200 OK",
-					StatusCode: http.StatusOK,
-					Header:     make(map[string][]string),
-				}
-				resp.Header.Set("cmd", "heartbeat")
-				cc.err = common.ResponseWriteWithBuffered(resp, conn)
-				if cc.err != nil {
-					fmt.Println("cc send to server /control/cmd heartbeat fail", cc.err)
-					cc.Cancel()
-				}
-			}()
+			resp := &http.Response{
+				Status:     "200 OK",
+				StatusCode: http.StatusOK,
+				Header:     make(map[string][]string),
+			}
+			resp.Header.Set("cmd", "heartbeat")
+			err := common.ResponseWriteWithBuffered(resp, conn)
+			if err != nil {
+				fmt.Println("cc send to server /control/cmd heartbeat fail", err)
+				common.SendError(cc.cancelCtx, err_chan, err)
+				return
+			}
 		}
 	}
 }
 
 func (cc *ControlChannel) Reconnect() {
 	fmt.Println("cc need reconnect", cc.svcName)
-	time.Sleep(30 * time.Second)
+	time.Sleep(8 * time.Second)
 	cc.client.svc_chan <- cc.svcName
 }
 
 func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) error {
 	ctx, cancel := context.WithCancel(parentCtx)
-
 	defer cancel()
 
 	var conn *net.TCPConn
 	var err error
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", args.clientConfig.RemoteAddr)
 
-	for i := 0; i < 1; i++ {
-		conn, err = net.DialTCP("tcp", nil, tcpAdr)
+	b := retry.NewFibonacci(1 * time.Second)
+	b = retry.WithMaxRetries(3, b)
+	err = retry.Do(ctx, b, func(innerCtx context.Context) error {
+		con, err := net.DialTCP("tcp", nil, tcpAdr)
 		if err != nil {
 			fmt.Println("datachannel connect server fail", err)
-			continue
-		} else {
-			break
+			return retry.RetryableError(err)
 		}
+		conn = con
+		return nil
+	})
+	if err != nil {
+		fmt.Println("datachannel retry.Do fail", err)
+		return err
 	}
 
 	if conn == nil {
-		fmt.Println("server retry fail ")
+		fmt.Println("datachannel conn is nil ")
 		return err
 	}
 
@@ -310,50 +256,18 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 
 	myconn := common.NewMyTcpConn(conn)
 
-	req, err := http.NewRequest("GET", "/data/hello", nil)
+	forwardType, err := common.Do_data_channel_handshake(myconn, args.sessionKey, args.svcConfig.Type)
 	if err != nil {
-		fmt.Println("datachannel create request /data/hello fail", err)
-		return err
-	}
-	req.Header.Set("session_key", args.sessionKey)
-	err = req.Write(myconn)
-	if err != nil {
-		fmt.Println("datachannel send request /data/hello fail", err)
-		return err
-	}
-	fmt.Println("datachannel send request /data/hello success")
-
-	respbuf := [...]byte{0, 0}
-	_, err = io.ReadFull(myconn, respbuf[:])
-	if err != nil {
-		fmt.Println("datachannel recv response /data/hello fail", err)
+		fmt.Println("datachannel do handshake fail", err)
 		return err
 	}
 
-	if respbuf[0] != 1 {
-		fmt.Println("datachannel recv response /data/hello not ok", respbuf)
-		return errors.New("recv response /data/hello not ok")
-	}
-
-	forwardType := config.ServiceType("")
-	switch respbuf[1] {
-	case 1:
-		forwardType = config.TCP
-	case 2:
-		forwardType = config.UDP
-	}
-
-	if forwardType != args.svcConfig.Type {
-		fmt.Println("datachannel forward type not equal", forwardType, args.svcConfig.Type)
-		return errors.New("forward type not equal")
-	}
-
-	fmt.Println("datachannel recv response /data/hello ok", forwardType, respbuf)
+	fmt.Println("datachannel do handshake ok", forwardType)
 
 	if forwardType == "tcp" {
-		forward_data_channel_for_tcp(ctx, myconn, args.svcConfig.LocalAddr, string(forwardType))
+		forward_data_channel_for_tcp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
 	} else if forwardType == "udp" {
-		forward_data_channel_for_udp(ctx, myconn, args.svcConfig.LocalAddr, string(forwardType))
+		forward_data_channel_for_udp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
 	} else {
 		fmt.Println("unknown forward type", forwardType)
 	}
@@ -398,8 +312,8 @@ func forward_data_channel_for_udp(ctx context.Context, remoteConn *common.MyTcpC
 		return
 	}
 
-	incomingPacketChan := make(chan *common.UdpPacket, 32)
-	outcomingPacketChan := make(chan *common.UdpPacket, 32)
+	incomingPacketChan := make(chan *common.UdpPacket, 32)  // tcp 连接收到的包
+	outcomingPacketChan := make(chan *common.UdpPacket, 32) // 需要通过tcp连接发送的包
 	err_chan := make(chan error, 3)
 
 	go read_packet_from_tcpconn(ctx, remoteConn, incomingPacketChan, err_chan)
@@ -439,7 +353,7 @@ label_for_outer:
 				mu.Lock()
 				mapping[rAddrStr] = inboundChan
 				mu.Unlock()
-				go forward_udp_in_and_out(ctx, udpConn, inboundChan, outcomingPacketChan, remotePacket.Addr, laddr)
+				go forward_udp_in_and_out(ctx, udpConn, inboundChan, outcomingPacketChan, err_chan, remotePacket.Addr, laddr)
 			}
 			mu.Lock()
 			inboundPacketChan, ok := mapping[rAddrStr]
@@ -465,13 +379,7 @@ func read_packet_from_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, in
 		remoteAddr, n, err := tcpConn.ReadPacket(p)
 		if err != nil {
 			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket error", err)
-			go func() {
-				select {
-				case <-ctx.Done():
-					return
-				case err_chan <- err:
-				}
-			}()
+			common.SendError(ctx, err_chan, err)
 			return
 		}
 		fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket", n, "packet.Addr:", remoteAddr)
@@ -497,10 +405,7 @@ func write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, out
 			n, err := tcpConn.WritePacket(packet.Payload, packet.Addr)
 			if err != nil {
 				fmt.Println("datachannel write_packet_to_tcpconn tcpConn.WritePacket error", err)
-				select {
-				case <-ctx.Done():
-				case err_chan <- err:
-				}
+				common.SendError(ctx, err_chan, err)
 				return
 			}
 			fmt.Println("datachannel write_packet_to_tcpconn tcpConn.WritePacket success", n, "packet.Addr:", packet.Addr)
@@ -508,12 +413,12 @@ func write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, out
 	}
 }
 
-func forward_udp_in_and_out(ctx context.Context, udpConn *net.UDPConn, inboundChan chan *common.UdpPacket, outboundChan chan *common.UdpPacket, remoteAddr *common.Address, localAddr *net.UDPAddr) {
+func forward_udp_in_and_out(ctx context.Context, udpConn *net.UDPConn, inboundChan chan *common.UdpPacket, outboundChan chan *common.UdpPacket, err_chan chan error, remoteAddr *common.Address, localAddr *net.UDPAddr) {
 	defer func() {
 		fmt.Println("datachannel forward_udp_in_and_out end")
 	}()
 
-	err_chan := make(chan error, 3)
+	local_err_chan := make(chan error, 3)
 
 	go func() {
 		defer func() {
@@ -525,15 +430,12 @@ func forward_udp_in_and_out(ctx context.Context, udpConn *net.UDPConn, inboundCh
 			n, addr, err := udpConn.ReadFromUDP(p)
 			if err != nil {
 				fmt.Println("datachannel forward_udp_in_and_out clientUDPConn.ReadFrom error", err)
-				go func() {
-					select {
-					case <-ctx.Done():
-						return
-					case err_chan <- err:
-					}
-				}()
+				common.SendError(ctx, local_err_chan, err)
 				return
 			}
+
+			fmt.Println("datachannel forward_udp_in_and_out udpConn.ReadFromUDP success", n, "from:", addr)
+
 			if addr.String() != localAddr.String() {
 				fmt.Println("datachannel forward_udp_in_and_out addr not equal, packet.Addr", addr.String(), "expect:", localAddr)
 				continue
@@ -552,13 +454,15 @@ func forward_udp_in_and_out(ctx context.Context, udpConn *net.UDPConn, inboundCh
 		case <-ctx.Done():
 			return
 
-		case <-err_chan:
+		case err := <-local_err_chan:
+			common.SendError(ctx, err_chan, err)
 			return
 
 		case packet := <-inboundChan:
 			n, err := udpConn.WriteToUDP(packet.Payload, localAddr)
 			if err != nil {
 				fmt.Println("datachannel forward_udp_in_and_out udpConn.WriteToUDP error", err)
+				common.SendError(ctx, err_chan, err)
 				return
 			}
 			fmt.Println("datachannel forward_udp_in_and_out udpConn.WriteToUDP success", n, "packet.Addr:", packet.Addr)
