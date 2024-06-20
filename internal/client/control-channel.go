@@ -17,8 +17,7 @@ import (
 type ControlChannel struct {
 	svcName string
 
-	clientConfig *config.ClientConfig
-	svcConfig    *config.ClientServiceConfig
+	svcConfig *config.ClientServiceConfig
 
 	client *Client
 
@@ -30,21 +29,20 @@ type ControlChannel struct {
 }
 
 type RunDataChannelArgs struct {
-	clientConfig *config.ClientConfig
-	svcConfig    *config.ClientServiceConfig
-	sessionKey   string
+	svcConfig  *config.ClientServiceConfig
+	sessionKey string
 }
 
-func NewControlChannel(client *Client, svcName string, clientConfig *config.ClientConfig, svcConfig *config.ClientServiceConfig) *ControlChannel {
+func NewControlChannel(client *Client, svcName string, svcConfig *config.ClientServiceConfig) *ControlChannel {
 	cancelCtx, cancel := context.WithCancel(client.cancelCtx)
 
 	return &ControlChannel{
-		svcName:      svcName,
-		client:       client,
-		clientConfig: clientConfig,
-		svcConfig:    svcConfig,
-		cancelCtx:    cancelCtx,
-		cancel:       cancel,
+		svcName: svcName,
+		client:  client,
+
+		svcConfig: svcConfig,
+		cancelCtx: cancelCtx,
+		cancel:    cancel,
 	}
 }
 
@@ -62,7 +60,7 @@ func (cc *ControlChannel) Cancel() {
 	}
 }
 
-func (cc *ControlChannel) Run() {
+func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	defer func() {
 		fmt.Println("cc Run end")
 	}()
@@ -74,7 +72,7 @@ func (cc *ControlChannel) Run() {
 	needReconnect := false // 是否重连
 	defer func() {
 		if needReconnect {
-			go cc.Reconnect()
+			ciChan <- &ComunicationItem{method: "reconnect", payload: cc.svcName}
 		}
 	}()
 
@@ -83,9 +81,9 @@ func (cc *ControlChannel) Run() {
 	var conn net.Conn
 
 	b := retry.NewFibonacci(1 * time.Second)
-	b = retry.WithMaxRetries(6, b)
+	b = retry.WithMaxRetries(3, b)
 	err := retry.Do(cc.cancelCtx, b, func(ctx context.Context) error {
-		con, err := net.Dial("tcp", cc.clientConfig.RemoteAddr)
+		con, err := net.Dial("tcp", ctx.Value(ContextKey("remoteAddr")).(string))
 		if err != nil {
 			fmt.Println("cc connect server fail", err)
 			return retry.RetryableError(err)
@@ -95,6 +93,7 @@ func (cc *ControlChannel) Run() {
 	})
 	if err != nil {
 		fmt.Println("cc server retry.Do fail", err)
+		needReconnect = true
 		return
 	}
 
@@ -138,9 +137,8 @@ OUTER:
 			if cmd == "datachannel" {
 				fmt.Println("cc recv server cmd datachannel")
 				args := RunDataChannelArgs{
-					clientConfig: cc.clientConfig,
-					svcConfig:    cc.svcConfig,
-					sessionKey:   session_key,
+					svcConfig:  cc.svcConfig,
+					sessionKey: session_key,
 				}
 
 				go create_data_channel(cc.cancelCtx, args)
@@ -209,11 +207,11 @@ func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn, err_chan ch
 	}
 }
 
-func (cc *ControlChannel) Reconnect() {
-	fmt.Println("cc need reconnect", cc.svcName)
-	time.Sleep(8 * time.Second)
-	cc.client.svc_chan <- cc.svcName
-}
+// func (cc *ControlChannel) Reconnect() {
+// 	fmt.Println("cc need reconnect", cc.svcName)
+// 	time.Sleep(8 * time.Second)
+// 	cc.client.svc_chan <- cc.svcName
+// }
 
 func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) error {
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -221,7 +219,7 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 
 	var conn *net.TCPConn
 	var err error
-	tcpAdr, _ := net.ResolveTCPAddr("tcp", args.clientConfig.RemoteAddr)
+	tcpAdr, _ := net.ResolveTCPAddr("tcp", ctx.Value(ContextKey("remoteAddr")).(string))
 
 	b := retry.NewFibonacci(1 * time.Second)
 	b = retry.WithMaxRetries(3, b)
