@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"math/rand"
@@ -32,41 +31,31 @@ type CliArgs struct {
 	Config     *config.Config
 }
 
-func (ca *CliArgs) GetRunMode() (RUN_MODE, error) {
-
-	if ca.Client {
-		if ca.Config.Client.RemoteAddr != "" {
+func GetRunMode(isServer, isClient bool, config *config.Config) (RUN_MODE, error) {
+	if isClient {
+		if config.Client.RemoteAddr != "" {
 			return RUN_CLIENT, nil
 		} else {
 			return RUN_UNKNOWN, errors.New("指定为客户端，但配置文件错误")
 		}
-	} else if ca.Server {
-		if ca.Config.Server.BindAddr != "" {
+	} else if isServer {
+		if config.Server.BindAddr != "" {
 			return RUN_SERVER, nil
 		} else {
 			return RUN_UNKNOWN, errors.New("指定为服务器端，但配置文件错误")
 		}
 	} else {
-		if ca.Config.Client.RemoteAddr != "" {
+		if config.Client.RemoteAddr != "" {
 			return RUN_CLIENT, nil
-		} else if ca.Config.Server.BindAddr != "" {
+		} else if config.Server.BindAddr != "" {
 			return RUN_SERVER, nil
 		}
 	}
 	return RUN_UNKNOWN, errors.New("不能判断出运行模式")
 }
 
-func GetCliArgs() (*CliArgs, error) {
-	isServer := flag.Bool("server", false, "-server run as a server")
-	isClient := flag.Bool("client", false, "-client run as a client")
-	flag.Parse()
-	args := flag.Args()
-	// fmt.Println("args", args)
-	if len(args) <= 0 {
-		return nil, errors.New("未指定配置文件")
-	}
-
-	content, err := os.ReadFile(args[0])
+func GetConfig(p string) (*config.Config, error) {
+	content, err := os.ReadFile(p)
 	if err != nil {
 		fmt.Println("ReadFile error", err)
 		return nil, errors.New("加载配置文件失败")
@@ -77,13 +66,7 @@ func GetCliArgs() (*CliArgs, error) {
 		fmt.Println("Decode error", err)
 		return nil, errors.New("解析配置文件失败")
 	}
-
-	return &CliArgs{
-		Server:     *isServer,
-		Client:     *isClient,
-		ConfigPath: args[0],
-		Config:     &conf,
-	}, nil
+	return &conf, nil
 }
 
 func RandStringRunes(n int) string {

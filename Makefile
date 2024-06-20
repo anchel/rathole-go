@@ -33,9 +33,9 @@ windows-amd64:
 run-server:
 	mkdir -p build
 	go build -o build/ratholego main.go
-	./build/ratholego -server local/server.toml
+	./build/ratholego --server local/server.toml
 
 run-client:
 	mkdir -p build
 	go build -o build/ratholego main.go
-	./build/ratholego -client local/client.toml
+	./build/ratholego --client local/client.toml
