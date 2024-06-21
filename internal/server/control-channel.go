@@ -253,33 +253,18 @@ func run_tcp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan
 }
 
 func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, datachannel_req_chan chan<- bool) {
-	// defer remoteConn.Close()
+	defer remoteConn.Close()
 
 	fmt.Println("forward_tcp_connection", remoteConn.RemoteAddr())
 
-	// 发送命令，指示客户端主动连接服务器
-	go func() {
-		select {
-		case <-cc.cancelCtx.Done():
-		case datachannel_req_chan <- true:
-		}
-	}()
-
-	var clientConn net.Conn
-	select {
-	case <-cc.cancelCtx.Done():
-		return
-	case clientConn = <-cc.data_chan:
-	}
-
-	clientTCPConn, ok := clientConn.(*common.MyTcpConn)
-	if !ok {
-		fmt.Println("forward_tcp_connection 获取的客户的连接不是tcp连接")
+	clientTCPConn := acquire_data_channel(cc, datachannel_req_chan)
+	if clientTCPConn == nil {
+		fmt.Println("forward_tcp_connection 获取客户端连接失败")
 		return
 	}
 
-	fmt.Println("成功取得客户的连接", clientConn.RemoteAddr())
-	defer clientConn.Close()
+	fmt.Println("成功取得客户的连接", clientTCPConn.RemoteAddr())
+	defer clientTCPConn.Close()
 
 	err := common.CopyTcpConnection(cc.cancelCtx, clientTCPConn, remoteConn)
 	if err != nil {
