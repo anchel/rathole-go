@@ -16,11 +16,10 @@ import (
 var GlobalControlChannelId int = 0
 
 type ControlChannel struct {
-	id           int
-	session_key  string
-	clientConfig *config.ServerConfig
-	service      *Service
-	s            *Server
+	id          int
+	session_key string
+
+	service *Service
 
 	connection *net.TCPConn
 	reader     *bufio.Reader
@@ -33,14 +32,13 @@ type ControlChannel struct {
 	canceled bool
 }
 
-func NewControlChannel(parentCtx context.Context, session_key string, conf *config.ServerConfig, service *Service, s *Server, conn *net.TCPConn, reader *bufio.Reader) *ControlChannel {
+func NewControlChannel(parentCtx context.Context, session_key string, service *Service, conn *net.TCPConn, reader *bufio.Reader) *ControlChannel {
 	ctx, cancel := context.WithCancel(parentCtx)
 	cc := &ControlChannel{
-		id:           GlobalControlChannelId,
-		session_key:  session_key,
-		clientConfig: conf,
-		service:      service,
-		s:            s,
+		id:          GlobalControlChannelId,
+		session_key: session_key,
+
+		service: service,
 
 		connection: conn,
 		reader:     reader,

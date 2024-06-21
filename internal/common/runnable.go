@@ -83,6 +83,17 @@ func (rm *RunnableManager) Remove(index int) {
 	rm.remove(index)
 }
 
+func (rm *RunnableManager) RemoveByKey(key1 string, key2 string) {
+	rm.Lock()
+	defer rm.Unlock()
+	idx, findItem := rm.get(key1, key2)
+	if findItem != nil {
+		findItem.item.Close()
+		rm.remove(idx)
+		time.Sleep(1 * time.Millisecond)
+	}
+}
+
 func (rm *RunnableManager) Len() int {
 	rm.Lock()
 	defer rm.Unlock()

@@ -28,20 +28,23 @@ type Server struct {
 	services              map[Digest]*Service
 	controlChannelManager *common.RunnableManager
 	mu                    sync.Mutex
-	cancelCtx             context.Context
-	cancel                context.CancelFunc
+
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	muDone   sync.Mutex
 	canceled bool
 }
 
-func NewServer(ctx context.Context, c *config.ServerConfig) *Server {
-	ctx, cancel := context.WithCancel(ctx)
+func NewServer(parentCtx context.Context, conf *config.ServerConfig) *Server {
+	baseCtx := context.WithValue(parentCtx, common.ContextKey("remoteAddr"), conf.BindAddr)
+	ctx, cancel := context.WithCancel(baseCtx)
+
 	s := &Server{}
-	s.config = c
-	s.services = make(map[Digest]*Service)
+	s.config = conf
+
 	s.controlChannelManager = common.NewRunnableManager()
-	s.cancelCtx = ctx
+	s.ctx = ctx
 	s.cancel = cancel
 
 	return s
@@ -49,10 +52,11 @@ func NewServer(ctx context.Context, c *config.ServerConfig) *Server {
 
 func (s *Server) Run(sigChan chan os.Signal, updater chan *config.Config) {
 	s.init()
-	s.acceptLoop(sigChan)
+	s.acceptLoop(sigChan, updater)
 }
 
 func (s *Server) init() {
+	s.services = make(map[Digest]*Service)
 	for k, v := range s.config.Services {
 		serviceDigest := common.CalSha256(k)
 		s.services[Digest(serviceDigest)] = &Service{
@@ -73,7 +77,7 @@ func (s *Server) Cancel() {
 	}
 }
 
-func (s *Server) acceptLoop(sigChan chan os.Signal) {
+func (s *Server) acceptLoop(sigChan chan os.Signal, updater chan *config.Config) {
 
 	go func() {
 		tcpAddr, _ := net.ResolveTCPAddr("tcp", s.config.BindAddr)
@@ -97,12 +101,19 @@ func (s *Server) acceptLoop(sigChan chan os.Signal) {
 label_for:
 	for {
 		select {
-		case <-s.cancelCtx.Done():
-			fmt.Println("server receive s.cancelCtx.Done()")
+		case <-s.ctx.Done():
+			fmt.Println("server receive s.ctx.Done()")
 			break label_for
+
 		case cc := <-sigChan:
 			fmt.Println("server receive interrupt", cc)
 			s.Cancel()
+
+		case conf, ok := <-updater:
+			if ok {
+				fmt.Println("server receive update")
+				s.hotUpdate(conf)
+			}
 		}
 	}
 	time.Sleep(10 * time.Millisecond)
@@ -152,7 +163,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		return
 	}
 	nonce := common.RandStringRunes(16)
-	// fmt.Println("nonce", nonce)
+
 	resp := &http.Response{
 		Status:     "200 OK",
 		StatusCode: http.StatusOK,
@@ -202,10 +213,13 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		return
 	}
 
-	cc := NewControlChannel(s.cancelCtx, session_key, s.config, service, s, conn, reader)
+	cc := NewControlChannel(s.ctx, session_key, service, conn, reader)
 
 	s.controlChannelManager.Put(serviceDigest, session_key, cc)
 
+	defer func() {
+		s.controlChannelManager.RemoveByKey(serviceDigest, "")
+	}()
 	cc.Run()
 }
 
@@ -249,8 +263,44 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 	fmt.Println("response /data/hello success", respbuf)
 
 	select {
-	case <-s.cancelCtx.Done():
+	case <-s.ctx.Done():
 	case <-cc.cancelCtx.Done():
 	case cc.data_chan <- common.NewMyTcpConn(conn):
 	}
+}
+
+func (s *Server) hotUpdate(newConfig *config.Config) {
+	serverConfig := newConfig.Server
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	newServices := make([]string, 0, 6)
+	delServices := make([]string, 0, 6)
+
+	for svcName := range serverConfig.Services {
+		_, ok := s.config.Services[svcName]
+		if !ok {
+			newServices = append(newServices, svcName)
+		}
+	}
+
+	for svcName := range s.config.Services {
+		_, ok := serverConfig.Services[svcName]
+		if !ok {
+			delServices = append(delServices, svcName)
+		}
+	}
+
+	fmt.Println("server hotUpdate newServices", newServices)
+	fmt.Println("server hotUpdate delServices", delServices)
+
+	for _, svcName := range delServices {
+		serviceDigest := common.CalSha256(svcName)
+		s.controlChannelManager.RemoveByKey(serviceDigest, "")
+	}
+
+	s.config.Services = serverConfig.Services
+
+	s.init()
 }

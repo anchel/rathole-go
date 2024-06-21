@@ -6,10 +6,9 @@ import (
 	"os"
 	"sync"
 
+	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/internal/config"
 )
-
-type ContextKey string
 
 type ComunicationItem struct {
 	method  string
@@ -29,8 +28,8 @@ type Client struct {
 	svc_chan chan string
 }
 
-func NewClient(ctx context.Context, conf *config.ClientConfig) *Client {
-	baseCtx := context.WithValue(ctx, ContextKey("remoteAddr"), conf.RemoteAddr)
+func NewClient(parentCtx context.Context, conf *config.ClientConfig) *Client {
+	baseCtx := context.WithValue(parentCtx, common.ContextKey("remoteAddr"), conf.RemoteAddr)
 	ctx, cancel := context.WithCancel(baseCtx)
 
 	return &Client{
@@ -115,7 +114,7 @@ func (client *Client) hotUpdate(newConfig *config.Config) {
 	for _, svcName := range delServices {
 		findCC, ok := client.controlChannelMap[svcName]
 		if ok {
-			fmt.Println("client hotUpdate find old cc, call cc.Close()", svcName)
+			fmt.Println("client hotUpdate find cc, call cc.Close()", svcName)
 			findCC.Close()
 			delete(client.controlChannelMap, svcName)
 		} else {
@@ -183,10 +182,14 @@ func (client *Client) run_new_controlchannel(svcName string) {
 		defer client.wg.Done()
 		defer close(ciChan)
 		cc.Run(ciChan)
-	}()
-}
 
-func (client *Client) getSvcConfigByName(svcName string) (config.ClientServiceConfig, bool) {
-	svcConfig, ok := client.Config.Services[svcName]
-	return svcConfig, ok
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		findCC, ok := client.controlChannelMap[svcName]
+		if ok {
+			fmt.Println("run_new_controlchannel find finished cc, remove it")
+			findCC.Close()
+			delete(client.controlChannelMap, svcName)
+		}
+	}()
 }

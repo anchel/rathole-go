@@ -79,7 +79,7 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	b := retry.NewFibonacci(1 * time.Second)
 	b = retry.WithMaxRetries(3, b)
 	err := retry.Do(cc.cancelCtx, b, func(ctx context.Context) error {
-		con, err := net.Dial("tcp", ctx.Value(ContextKey("remoteAddr")).(string))
+		con, err := net.Dial("tcp", ctx.Value(common.ContextKey("remoteAddr")).(string))
 		if err != nil {
 			fmt.Println("cc connect server fail", err)
 			return retry.RetryableError(err)
@@ -209,7 +209,7 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 
 	var conn *net.TCPConn
 	var err error
-	tcpAdr, _ := net.ResolveTCPAddr("tcp", ctx.Value(ContextKey("remoteAddr")).(string))
+	tcpAdr, _ := net.ResolveTCPAddr("tcp", ctx.Value(common.ContextKey("remoteAddr")).(string))
 
 	b := retry.NewFibonacci(1 * time.Second)
 	b = retry.WithMaxRetries(3, b)
