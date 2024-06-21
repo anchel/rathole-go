@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/internal/config"
 	"github.com/anchel/rathole-go/internal/server"
+	"github.com/anchel/rathole-go/internal/updater"
 	"github.com/spf13/cobra"
 )
 
@@ -60,16 +62,24 @@ func Run(configPath string) error {
 		return err
 	}
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+
+	updater, err := updater.GetUpdater(rootCtx, configPath)
+	if err != nil {
+		fmt.Println("create updater fail", err) // 创建热更新失败，不影响程序继续
+	}
 
 	switch runMode {
 	case common.RUN_CLIENT:
 		fmt.Println("run as a client")
-		run_client(c, conf)
+		run_client(rootCtx, signalChan, updater, conf)
 	case common.RUN_SERVER:
 		fmt.Println("run as a server")
-		run_server(c, conf)
+		run_server(rootCtx, signalChan, updater, conf)
 	default:
 		fmt.Println("unknown runmode")
 		err = errors.New("unknown runmode")
@@ -77,12 +87,12 @@ func Run(configPath string) error {
 	return err
 }
 
-func run_client(c chan os.Signal, conf *config.Config) {
-	client := client.NewClient(&conf.Client)
-	client.Run(c)
+func run_client(ctx context.Context, c chan os.Signal, updater chan *config.Config, conf *config.Config) {
+	client := client.NewClient(ctx, &conf.Client)
+	client.Run(c, updater)
 }
 
-func run_server(c chan os.Signal, conf *config.Config) {
-	server := server.NewServer(&conf.Server)
-	server.Run(c)
+func run_server(ctx context.Context, c chan os.Signal, updater chan *config.Config, conf *config.Config) {
+	server := server.NewServer(ctx, &conf.Server)
+	server.Run(c, updater)
 }

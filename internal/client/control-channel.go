@@ -19,8 +19,6 @@ type ControlChannel struct {
 
 	svcConfig *config.ClientServiceConfig
 
-	client *Client
-
 	cancelCtx context.Context
 	cancel    context.CancelFunc
 
@@ -33,13 +31,11 @@ type RunDataChannelArgs struct {
 	sessionKey string
 }
 
-func NewControlChannel(client *Client, svcName string, svcConfig *config.ClientServiceConfig) *ControlChannel {
-	cancelCtx, cancel := context.WithCancel(client.cancelCtx)
+func NewControlChannel(clientCtx *context.Context, svcName string, svcConfig *config.ClientServiceConfig) *ControlChannel {
+	cancelCtx, cancel := context.WithCancel(*clientCtx)
 
 	return &ControlChannel{
-		svcName: svcName,
-		client:  client,
-
+		svcName:   svcName,
 		svcConfig: svcConfig,
 		cancelCtx: cancelCtx,
 		cancel:    cancel,
@@ -206,12 +202,6 @@ func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn, err_chan ch
 		}
 	}
 }
-
-// func (cc *ControlChannel) Reconnect() {
-// 	fmt.Println("cc need reconnect", cc.svcName)
-// 	time.Sleep(8 * time.Second)
-// 	cc.client.svc_chan <- cc.svcName
-// }
 
 func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) error {
 	ctx, cancel := context.WithCancel(parentCtx)

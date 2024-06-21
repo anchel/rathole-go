@@ -35,8 +35,8 @@ type Server struct {
 	canceled bool
 }
 
-func NewServer(c *config.ServerConfig) *Server {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewServer(ctx context.Context, c *config.ServerConfig) *Server {
+	ctx, cancel := context.WithCancel(ctx)
 	s := &Server{}
 	s.config = c
 	s.services = make(map[Digest]*Service)
@@ -47,7 +47,7 @@ func NewServer(c *config.ServerConfig) *Server {
 	return s
 }
 
-func (s *Server) Run(sigChan chan os.Signal) {
+func (s *Server) Run(sigChan chan os.Signal, updater chan *config.Config) {
 	s.init()
 	s.acceptLoop(sigChan)
 }
