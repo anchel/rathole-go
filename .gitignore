@@ -1,5 +1,6 @@
 .idea
 .VSCodeCounter
+.DS_Store
 
 build
 
