@@ -90,6 +90,7 @@ func (cc *ControlChannel) Run() {
 
 	go cc.do_read_cmd(cmd_chan, err_chan)
 
+	// 下面两个，涉及对net.Conn的并发调用，可能会有数据竞争问题
 	go cc.do_send_heartbeat_to_client(err_chan)
 	go cc.do_send_create_datachannel(datachannel_req_chan, err_chan)
 
