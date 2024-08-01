@@ -40,3 +40,8 @@ run-client:
 	mkdir -p build
 	go build -o build/ratholego main.go
 	GODEBUG='gctrace=1' ./build/ratholego --client local/client.toml
+
+run-client-tianyiyun:
+	mkdir -p build
+	go build -o build/ratholego main.go
+	GODEBUG='gctrace=1' ./build/ratholego --client local/client-tianyiyun.toml

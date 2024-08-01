@@ -93,20 +93,53 @@ type ReadCloseWriter interface {
 	CloseWrite() error
 }
 
+func UnwrapNetError(err error) error {
+	werr := errors.Unwrap(err)
+	lastErr := err
+	for werr != nil && IsNetError(werr) {
+		lastErr = werr
+		werr = errors.Unwrap(werr)
+	}
+	return lastErr
+}
+
+func IsNetErrorRead(err error) bool {
+	werr := UnwrapNetError(err)
+	e, ok := werr.(*net.OpError)
+	if ok && e.Op == "read" {
+		return true
+	}
+	return false
+}
+
+func IsNetErrorWrite(err error) bool {
+	werr := UnwrapNetError(err)
+	e, ok := werr.(*net.OpError)
+	if ok && e.Op == "write" {
+		return true
+	}
+	return false
+}
+
+func IsNetError(err error) bool {
+	_, ok := err.(*net.OpError)
+	return ok
+}
+
 func CopyTcpConnection(ctx context.Context, dst ReadCloseWriter, src ReadCloseWriter) error {
-	chan_remote_to_local := make(chan error, 1)
-	chan_local_to_remote := make(chan error, 1)
+	chan_src_to_dst := make(chan error, 1)
+	chan_dst_to_src := make(chan error, 1)
 
 	go func() {
 		written, err := io.Copy(dst, src)
-		fmt.Println("datachannel remote forward to local", written, err)
-		chan_remote_to_local <- err
+		fmt.Println("datachannel src forward to dst", written, err)
+		chan_src_to_dst <- err
 	}()
 
 	go func() {
 		written, err := io.Copy(src, dst)
-		fmt.Println("datachannel local forward to remote", written, err)
-		chan_local_to_remote <- err
+		fmt.Println("datachannel dst forward to src", written, err)
+		chan_dst_to_src <- err
 	}()
 
 	var done1, done2 bool
@@ -118,10 +151,10 @@ label_for:
 		case <-ctx.Done():
 			break label_for
 
-		case err2 = <-chan_local_to_remote:
+		case err2 = <-chan_dst_to_src:
 			done2 = true
 
-			if err2 == nil && !done1 { // 只有正常情况下，才关闭另一方的写，但是这里也可能会有问题，假如dst也已经关闭了，此时就会报错
+			if (err2 == nil || IsNetErrorRead(err2)) && !done1 {
 				if e := src.CloseWrite(); e != nil {
 					fmt.Println("local to remote normal end, CloseWrite remote error", e)
 				}
@@ -131,10 +164,10 @@ label_for:
 				break label_for
 			}
 
-		case err1 = <-chan_remote_to_local:
+		case err1 = <-chan_src_to_dst:
 			done1 = true
 
-			if err1 == nil && !done2 { // 只有正常情况下，才关闭另一方的写，但是这里也可能会有问题，假如dst也已经关闭了，此时就会报错
+			if (err1 == nil || IsNetErrorRead(err1)) && !done2 {
 				if e := dst.CloseWrite(); e != nil {
 					fmt.Println("remote to local normal end, CloseWrite local error", e)
 				}

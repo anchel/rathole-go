@@ -254,7 +254,12 @@ func run_tcp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan
 }
 
 func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, datachannel_req_chan chan<- bool) {
-	defer remoteConn.Close()
+	defer func() {
+		err := remoteConn.Close()
+		if err != nil {
+			fmt.Println("forward_tcp_connection remoteConn.Close error", err)
+		}
+	}()
 
 	fmt.Println("forward_tcp_connection", remoteConn.RemoteAddr())
 
@@ -265,7 +270,12 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, datacha
 	}
 
 	fmt.Println("成功取得客户的连接", clientTCPConn.RemoteAddr())
-	defer clientTCPConn.Close()
+	defer func() {
+		err := clientTCPConn.Close()
+		if err != nil {
+			fmt.Println("forward_tcp_connection clientTCPConn.Close error", err)
+		}
+	}()
 
 	err := common.CopyTcpConnection(cc.cancelCtx, clientTCPConn, remoteConn)
 	if err != nil {
