@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/internal/config"
@@ -25,7 +26,12 @@ type Client struct {
 
 	wg sync.WaitGroup
 
-	svc_chan chan string
+	svc_chan chan svc_create
+}
+
+type svc_create struct {
+	svcName string
+	delay   time.Duration
 }
 
 func NewClient(parentCtx context.Context, conf *config.ClientConfig) *Client {
@@ -39,7 +45,7 @@ func NewClient(parentCtx context.Context, conf *config.ClientConfig) *Client {
 		ctx:               ctx,
 		cancel:            cancel,
 
-		svc_chan: make(chan string, len(conf.Services)),
+		svc_chan: make(chan svc_create, len(conf.Services)),
 	}
 }
 
@@ -51,14 +57,17 @@ func (client *Client) Run(sigChan chan os.Signal, updater chan *config.Config) {
 			select {
 			case <-client.ctx.Done():
 				return
-			case sn := <-client.svc_chan:
-				client.run_new_controlchannel(sn)
+			case sc := <-client.svc_chan:
+				go func() {
+					time.Sleep(sc.delay)
+					client.run_new_controlchannel(sc.svcName)
+				}()
 			}
 		}
 	}()
 
 	for svcName := range client.Config.Services {
-		client.svc_chan <- svcName
+		client.svc_chan <- svc_create{svcName: svcName, delay: 1 * time.Second}
 	}
 
 label_for:
@@ -130,7 +139,7 @@ func (client *Client) hotUpdate(newConfig *config.Config) {
 				select {
 				case <-client.ctx.Done():
 					return
-				case client.svc_chan <- svcName:
+				case client.svc_chan <- svc_create{svcName: svcName, delay: 1 * time.Second}:
 				}
 			}
 		}()
@@ -163,14 +172,14 @@ func (client *Client) run_new_controlchannel(svcName string) {
 		for {
 			item, ok := <-ciChan
 			if !ok {
-				fmt.Println("ciChan closed")
+				fmt.Println("ciChan is closed")
 				return
 			}
 			if item.method == "reconnect" {
 				select {
 				case <-client.ctx.Done():
 					return
-				case client.svc_chan <- item.payload:
+				case client.svc_chan <- svc_create{svcName: item.payload, delay: 3 * time.Second}:
 					fmt.Println("reconnect were sended to channel")
 				}
 			}
@@ -181,6 +190,7 @@ func (client *Client) run_new_controlchannel(svcName string) {
 	go func() {
 		defer client.wg.Done()
 		defer close(ciChan)
+
 		cc.Run(ciChan)
 
 		client.mu.Lock()

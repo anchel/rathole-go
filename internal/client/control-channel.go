@@ -68,6 +68,7 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	needReconnect := false // 是否重连
 	defer func() {
 		if needReconnect {
+			fmt.Println("cc need reconnect")
 			ciChan <- &ComunicationItem{method: "reconnect", payload: cc.svcName}
 		}
 	}()
@@ -108,6 +109,7 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	session_key, err := common.Do_control_channel_handshake(conn, br, cc.svcName, cc.svcConfig.Token)
 	if err != nil {
 		fmt.Println("cc Do_control_channel_handshake fail", err)
+		needReconnect = true
 		return
 	}
 

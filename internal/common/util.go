@@ -208,7 +208,7 @@ func DiscardRewindConn(rconn *RewindConn, resp *http.Response) error {
 func Do_control_channel_handshake(conn net.Conn, br *bufio.Reader, svcName string, token string) (string, error) {
 
 	digest := CalSha256(svcName)
-	fmt.Println("digest", digest)
+	fmt.Println("Do_control_channel_handshake digest", digest)
 	req, err := http.NewRequest("GET", "/control/hello", nil)
 	if err != nil {
 		fmt.Println("cc create request /control/hello fail", err)
