@@ -1,10 +1,8 @@
 # rathole-go
 
-> 参考rust版的rathole，用go实现。配置文件和rathole的一致。目前只实现了基础功能
+> 内网穿透工具，将内网的服务通过公网ip暴露出去。
 
-下面的说明是搬自rathole
-
-使用 rathole 需要一个有公网 IP 的服务器，和一个在 NAT 或防火墙后的设备，其中有些服务需要暴露在互联网上。
+使用 ratholego 需要一个有公网 IP 的服务器，和一个在 NAT 或防火墙后的设备，其中有些服务需要暴露在互联网上。
 
 假设你在家里的 NAT 后面有一个 NAS，并且想把它的 ssh 服务暴露在公网上：
 
@@ -25,7 +23,7 @@ bind_addr = "0.0.0.0:5202" # `5202` 配置了将 `my_nas_ssh` 暴露给互联网
 然后运行:
 
 ```bash
-./ratholego server.toml
+./ratholego --server server.toml
 ```
 
 2. 在 NAT 后面的主机（你的 NAS）上
@@ -44,7 +42,7 @@ local_addr = "127.0.0.1:22" # 需要被转发的服务的地址
 然后运行：
 
 ```bash
-./ratholego client.toml
+./ratholego --client client.toml
 ```
 
 3. 现在 `rathole` 客户端会连接运行在 `myserver.com:2333`的 `rathole` 服务器，任何到 `myserver.com:5202` 的流量将被转发到客户端所在主机的 `22` 端口。
@@ -53,7 +51,6 @@ local_addr = "127.0.0.1:22" # 需要被转发的服务的地址
 
 ## Configuration
 
-如果只有一个 `[server]` 和 `[client]` 块存在的话，`rathole` 可以根据配置文件的内容自动决定在服务器模式或客户端模式下运行，就像 [Quickstart](#quickstart) 中的例子。
+如果只有一个 `[server]` 和 `[client]` 块存在的话，`rathole` 可以根据配置文件的内容自动决定在服务器模式或客户端模式下运行。
 
 但 `[client]` 和 `[server]` 块也可以放在一个文件中。然后在服务器端，运行 `ratholego --server config.toml`。在客户端，运行 `ratholego --client config.toml` 来明确告诉 `rathole` 运行模式。
-
