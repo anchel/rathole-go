@@ -1,0 +1,13 @@
+# server.toml
+[server]
+bind_addr = "0.0.0.0:2334"
+
+[server.services.develop_any_tcp]
+type = "tcp"
+token = "123456"
+bind_addr = "0.0.0.0:8088"
+
+[server.services.develop_any_udp]
+type = "udp"
+token = "123456"
+bind_addr = "0.0.0.0:8088"

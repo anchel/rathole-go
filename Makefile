@@ -1,8 +1,7 @@
 
 NAME=ratholego
 BUILD_DIR=build
-# GOBUILD=CGO_ENABLED=0 go build -trimpath -ldflags '-w -s -buildid='
-GOBUILD=go build
+GOBUILD=CGO_ENABLED=0 go build -trimpath -ldflags '-w -s -buildid='
 
 normal: clean all
 
@@ -34,14 +33,9 @@ windows-amd64:
 run-server:
 	mkdir -p build
 	go build -o build/ratholego main.go
-	GODEBUG='gctrace=1' ./build/ratholego --server local/server.toml
+	./build/ratholego --server config/server.sample.toml
 
 run-client:
 	mkdir -p build
 	go build -o build/ratholego main.go
-	GODEBUG='gctrace=1' ./build/ratholego --client local/client.toml
-
-run-client-tianyiyun:
-	mkdir -p build
-	go build -o build/ratholego main.go
-	GODEBUG='gctrace=1' ./build/ratholego --client local/client-tianyiyun.toml
+	./build/ratholego --client config/client.sample.toml
