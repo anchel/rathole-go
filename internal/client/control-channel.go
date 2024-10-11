@@ -119,8 +119,15 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	go cc.do_read_cmd(br, cmd_chan, err_chan)
 	go cc.do_send_heartbeat_to_server(conn, err_chan)
 
+	timer := time.NewTimer(120 * time.Second)
+
 OUTER:
 	for {
+		if !timer.Stop() {
+			<-timer.C
+		}
+		timer.Reset(120 * time.Second)
+
 		select {
 		case <-cc.cancelCtx.Done():
 			fmt.Println("cc receive cancel")
@@ -144,7 +151,7 @@ OUTER:
 				fmt.Println("cc recv server cmd heartbeat")
 			}
 
-		case <-time.After(120 * time.Second):
+		case <-timer.C:
 			fmt.Println("cc recv server heartbeat timeout")
 			needReconnect = true
 			break OUTER
