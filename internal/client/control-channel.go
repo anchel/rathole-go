@@ -80,7 +80,8 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	b := retry.NewFibonacci(1 * time.Second)
 	b = retry.WithMaxRetries(3, b)
 	err := retry.Do(cc.cancelCtx, b, func(ctx context.Context) error {
-		con, err := net.Dial("tcp", ctx.Value(common.ContextKey("remoteAddr")).(string))
+		timeout := 5 * time.Second // 设置超时时间为 5 秒
+		con, err := net.DialTimeout("tcp", ctx.Value(common.ContextKey("remoteAddr")).(string), timeout)
 		if err != nil {
 			fmt.Println("cc connect server fail", err)
 			return retry.RetryableError(err)
@@ -218,17 +219,17 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 
 	var conn *net.TCPConn
 	var err error
-	tcpAdr, _ := net.ResolveTCPAddr("tcp", ctx.Value(common.ContextKey("remoteAddr")).(string))
 
 	b := retry.NewFibonacci(1 * time.Second)
 	b = retry.WithMaxRetries(3, b)
 	err = retry.Do(ctx, b, func(innerCtx context.Context) error {
-		con, err := net.DialTCP("tcp", nil, tcpAdr)
+		timeout := 5 * time.Second // 设置超时时间为 5 秒
+		con, err := net.DialTimeout("tcp", ctx.Value(common.ContextKey("remoteAddr")).(string), timeout)
 		if err != nil {
 			fmt.Println("datachannel connect server fail", err)
 			return retry.RetryableError(err)
 		}
-		conn = con
+		conn = con.(*net.TCPConn)
 		return nil
 	})
 	if err != nil {
@@ -275,11 +276,16 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
 	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
-	clientConn, err := net.DialTCP(network, nil, tcpAdr)
+
+	timeout := 5 * time.Second // 设置超时时间为 5 秒
+	conn, err := net.DialTimeout(network, tcpAdr.String(), timeout)
+
 	if err != nil {
 		fmt.Println("connect localaddr fail", err)
 		return
 	}
+
+	clientConn := conn.(*net.TCPConn)
 	defer func() {
 		fmt.Println("forward_data_channel_for_tcp clientConn.Close()")
 		err := clientConn.Close()

@@ -5,9 +5,9 @@ remote_addr = "127.0.0.1:2334"
 [client.services.develop_any_tcp]
 type = "tcp"
 token = "123456"
-local_addr = "127.0.0.1:22"
+local_addr = "127.0.0.1:8080"
 
 [client.services.develop_any_udp]
 type = "udp"
 token = "123456"
-local_addr = "127.0.0.1:22"
+local_addr = "127.0.0.1:8080"
