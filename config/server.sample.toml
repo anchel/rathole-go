@@ -1,6 +1,8 @@
 # server.toml
 [server]
 bind_addr = "0.0.0.0:2334"
+auth_username = "admin"
+auth_password = "admin"
 
 [server.services.develop_any_tcp]
 type = "tcp"

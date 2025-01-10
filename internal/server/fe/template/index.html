@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <title>rathole-go</title>
+    <link rel="stylesheet" href="/fe/style/index.css">
+</head>
+<body>
+    <h1>rathole-go</h1>
+    <p>BindAddr: {{.BindAddr}}</p>
+    <table>
+        <thead>
+        <tr>
+            <th>Service</th>
+            <th>Type</th>
+            <th>Token</th>
+            <th>BindAddr</th>
+            <th>ControlChannel</th>
+            <th>DataChannel</th>
+            <th>Operation</th>
+        </tr>
+        </thead>
+        <tbody>
+    {{range $key,$val := .Services}}
+        <tr class="">
+            <td><span>{{$val.Name}}</span></td>
+            <td><span>{{$val.Type}}</span></td>
+            <td><span>{{$val.Token}}</span></td>
+            <td><span>{{$val.BindAddr}}</span></td>
+            <td><div>{{$val.ControlChannel}}</div></td>
+            <td><div>{{$val.DataChannel}}</div></td>
+            <td>
+                
+            </td>
+        </tr>
+    {{end}}
+        </tbody>
+    </table>
+
+    <style type="text/css">
+        .flow-row {
+            display: flex;
+            align-items: center;
+        }
+    </style>
+    <script type="text/javascript" src="/fe/js/index.js"></script>
+    <script type="text/javascript">
+        document.querySelector('table').addEventListener('click', function (e) {
+            if (e.target.tagName === 'BUTTON') {
+                if (!confirm('Are you sure to delete this service?')) {
+                    return;
+                }
+                var tr = e.target.closest('tr');
+                var service = tr.querySelector('td:nth-child(1) span').innerText;
+                // var token = tr.querySelector('td:nth-child(3) span').innerText;
+                console.log(service);
+                fetch('/api/service/delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        service: service,
+                    })
+                }).then(function (res) {
+                    return res.json();
+                }).then(function (res) {
+                    if (res.code === 0) {
+                        // location.reload();
+                        tr.remove();
+                    } else {
+                        alert(res.message);
+                    }
+                }).catch(function (err) {
+                    console.error(err);
+                });
+            }
+        });
+    </script>
+</body>
+</html>

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/internal/config"
 	"github.com/fsnotify/fsnotify"
 )
@@ -40,7 +39,7 @@ func GetUpdater(ctx context.Context, filePath string) (chan *config.Config, erro
 				// fmt.Println("event:", event)
 				if event.Has(fsnotify.Write) {
 					fmt.Println("modified file:", event.Name)
-					conf, err := common.GetConfig(filePath)
+					conf, err := config.GetConfig()
 					if err != nil {
 						fmt.Println("updater read config fail", err)
 					} else {

@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 	Long:  "nat proxy, from public network to private network",
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) <= 0 {
-			fmt.Println("配置文件路径为空")
+			fmt.Println("The configuration file path is empty")
 			os.Exit(1)
 		}
 		err := Run(args[0])
@@ -55,9 +55,11 @@ func Execute() {
 }
 
 func Run(configPath string) error {
-	conf, err := common.GetConfig(configPath)
+	config.SetConfigPath(configPath)
+
+	conf, err := config.GetConfig()
 	if err != nil {
-		return errors.New("读取配置失败")
+		return errors.New("failed to read configuration")
 	}
 
 	runMode, err := common.GetRunMode(isServer, isClient, conf)

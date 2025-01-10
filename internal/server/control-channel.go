@@ -21,9 +21,10 @@ type ControlChannel struct {
 
 	service *Service
 
-	connection *net.TCPConn
-	reader     *bufio.Reader
-	data_chan  chan net.Conn
+	connection       *net.TCPConn
+	reader           *bufio.Reader
+	data_chan        chan net.Conn
+	num_data_channel int32
 
 	cancelCtx context.Context
 	cancel    context.CancelFunc
@@ -40,9 +41,10 @@ func NewControlChannel(parentCtx context.Context, session_key string, service *S
 
 		service: service,
 
-		connection: conn,
-		reader:     reader,
-		data_chan:  make(chan net.Conn, 6),
+		connection:       conn,
+		reader:           reader,
+		data_chan:        make(chan net.Conn, 6),
+		num_data_channel: 0,
 
 		cancelCtx: ctx,
 		cancel:    cancel,
@@ -164,6 +166,9 @@ func (cc *ControlChannel) do_send_create_datachannel(datachannel_req_chan chan b
 		case <-datachannel_req_chan:
 			fmt.Println("cc start send to client /contro/cmd datachannel")
 			resp := &http.Response{
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
 				Status:     "200 OK",
 				StatusCode: http.StatusOK,
 				Header:     make(map[string][]string),
@@ -187,6 +192,9 @@ func (cc *ControlChannel) do_send_heartbeat_to_client(err_chan chan error) {
 		case <-time.After(110 * time.Second):
 			fmt.Println("cc start send to client /contro/cmd heartbeat")
 			resp := &http.Response{
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
 				Status:     "200 OK",
 				StatusCode: http.StatusOK,
 				Header:     make(map[string][]string),
@@ -200,6 +208,10 @@ func (cc *ControlChannel) do_send_heartbeat_to_client(err_chan chan error) {
 			}
 		}
 	}
+}
+
+func (cc *ControlChannel) NumDataChannel() int32 {
+	return cc.num_data_channel
 }
 
 func run_tcp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan chan error) {
@@ -270,11 +282,14 @@ func forward_tcp_connection(cc *ControlChannel, remoteConn *net.TCPConn, datacha
 	}
 
 	fmt.Println("成功取得客户的连接", clientTCPConn.RemoteAddr())
+	cc.num_data_channel += 1
+
 	defer func() {
 		err := clientTCPConn.Close()
 		if err != nil {
 			fmt.Println("forward_tcp_connection clientTCPConn.Close error", err)
 		}
+		cc.num_data_channel -= 1
 	}()
 
 	err := common.CopyTcpConnection(cc.cancelCtx, clientTCPConn, remoteConn)
@@ -341,6 +356,7 @@ func run_udp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan
 			if err != nil {
 				fmt.Println("cc run_udp_loop clientTCPConn.Close error", err)
 			}
+			cc.num_data_channel -= 1
 		}
 	}()
 
@@ -367,6 +383,8 @@ func run_udp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan
 		case ctc := <-tmpClientTCPConnChan:
 			fmt.Println("cc run_udp_loop <-tmpClientTCPConnChan, LocalAddr:", ctc.LocalAddr(), "RemoteAddr:", ctc.RemoteAddr())
 			clientTCPConn = ctc
+			cc.num_data_channel += 1 // 统计用
+
 			tmpClientTCPConnChan = nil
 			var tmpUdpPacket *common.UdpPacket
 			if inboundUdpPacket != nil {
@@ -507,7 +525,7 @@ func read_packet_from_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, ou
 			common.SendError(ctx, err_chan, err)
 			return
 		}
-		fmt.Println("datachannel read_packet_from_tcpconn clientTCPConn.ReadPacket", n, "packet.Addr:", addr)
+		fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket", n, "packet.Addr:", addr)
 		select {
 		case <-ctx.Done():
 			return

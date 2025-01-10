@@ -8,7 +8,7 @@ normal: clean all
 clean:
 	rm -rf $(BUILD_DIR)
 
-all: darwin-arm64 darwin-amd64 linux-amd64 windows-amd64
+all: darwin-arm64 darwin-amd64 linux-amd64 linux-arm64 windows-amd64
 
 darwin-amd64:
 	GOARCH=amd64 GOOS=darwin $(GOBUILD) -o $(BUILD_DIR)/$(NAME)-$@

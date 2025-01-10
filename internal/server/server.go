@@ -79,14 +79,15 @@ func (s *Server) Cancel() {
 
 func (s *Server) acceptLoop(sigChan chan os.Signal, updater chan *config.Config) {
 
+	tcpAddr, _ := net.ResolveTCPAddr("tcp", s.config.BindAddr)
+	l, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		fmt.Println("server listen fail", err)
+		return
+	}
+	fmt.Println("server started listen", s.config.BindAddr)
+
 	go func() {
-		tcpAddr, _ := net.ResolveTCPAddr("tcp", s.config.BindAddr)
-		l, err := net.ListenTCP("tcp", tcpAddr)
-		if err != nil {
-			fmt.Println("server listen fail", err)
-			return
-		}
-		fmt.Println("server started listen")
 		for {
 			conn, err := l.AcceptTCP()
 			if err != nil {
@@ -116,6 +117,11 @@ label_for:
 			}
 		}
 	}
+	err = l.Close()
+	if err != nil {
+		fmt.Println("server close fail", err)
+	}
+
 	time.Sleep(10 * time.Millisecond)
 	fmt.Println("server goto shutdown")
 }
@@ -133,6 +139,8 @@ func serveConnection(s *Server, conn *net.TCPConn) {
 		do_control_channel_handshake(s, conn, reader, req)
 	case "/data/hello":
 		do_data_channel_handshake(s, conn, req)
+	default:
+		do_httpapi(s, conn, req)
 	}
 }
 
@@ -152,6 +160,9 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 	if !ok {
 		fmt.Println("server can not find service", serviceDigest)
 		resp := &http.Response{
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
 			Status:     "404 not found",
 			StatusCode: http.StatusNotFound,
 			Header:     make(map[string][]string),
@@ -165,6 +176,9 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 	nonce := common.RandStringRunes(16)
 
 	resp := &http.Response{
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
 		Status:     "200 OK",
 		StatusCode: http.StatusOK,
 		Header:     make(map[string][]string),
@@ -190,6 +204,9 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 	if session_key != d {
 		fmt.Println("recv hello auth invalid", d, session_key)
 		resp = &http.Response{
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
 			Status:     "401 Unauthorized",
 			StatusCode: http.StatusUnauthorized,
 			Header:     make(map[string][]string),
@@ -203,6 +220,9 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 	fmt.Println("recv hello auth success", session_key)
 
 	resp = &http.Response{
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
 		Status:     "200 OK",
 		StatusCode: http.StatusOK,
 		Header:     make(map[string][]string),
@@ -236,6 +256,10 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 		if err != nil {
 			fmt.Println("response /data/hello fail", err)
 		}
+		err = conn.Close()
+		if err != nil {
+			fmt.Println("close connection fail", err)
+		}
 		return
 	}
 
@@ -247,7 +271,8 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 		return
 	}
 
-	respbuf[0] = 1
+	respbuf[0] = 1 // 1-OK, 0-FAIL
+
 	switch cc.service.svcType {
 	case config.TCP:
 		respbuf[1] = 1
@@ -257,6 +282,10 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 	_, err := conn.Write(respbuf[:])
 	if err != nil {
 		fmt.Println("response /data/hello fail", err)
+		err = conn.Close()
+		if err != nil {
+			fmt.Println("close connection fail", err)
+		}
 		return
 	}
 
@@ -303,4 +332,9 @@ func (s *Server) hotUpdate(newConfig *config.Config) {
 	s.config.Services = serverConfig.Services
 
 	s.init()
+}
+
+// 检查是否启用了http authorization
+func (s *Server) authEnabled() bool {
+	return len(s.config.AuthUsername) > 0 || len(s.config.AuthPassword) > 0
 }

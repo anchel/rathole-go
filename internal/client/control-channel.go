@@ -198,6 +198,9 @@ func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn, err_chan ch
 		case <-time.After(110 * time.Second):
 			fmt.Println("cc start send to server /contro/cmd heartbeat")
 			resp := &http.Response{
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
 				Status:     "200 OK",
 				StatusCode: http.StatusOK,
 				Header:     make(map[string][]string),

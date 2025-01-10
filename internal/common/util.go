@@ -10,9 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"os"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchel/rathole-go/internal/config"
 )
 
@@ -52,21 +50,6 @@ func GetRunMode(isServer, isClient bool, config *config.Config) (RUN_MODE, error
 		}
 	}
 	return RUN_UNKNOWN, errors.New("不能判断出运行模式")
-}
-
-func GetConfig(p string) (*config.Config, error) {
-	content, err := os.ReadFile(p)
-	if err != nil {
-		fmt.Println("ReadFile error", err)
-		return nil, errors.New("加载配置文件失败")
-	}
-	var conf config.Config
-	_, err = toml.Decode(string(content), &conf)
-	if err != nil {
-		fmt.Println("Decode error", err)
-		return nil, errors.New("解析配置文件失败")
-	}
-	return &conf, nil
 }
 
 func RandStringRunes(n int) string {
