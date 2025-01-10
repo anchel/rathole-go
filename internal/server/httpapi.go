@@ -149,7 +149,7 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 			Type           config.ServiceType
 			Token          string
 			BindAddr       string
-			ControlChannel int32
+			ControlChannel string
 			DataChannel    int32
 		}
 	}{}
@@ -161,7 +161,7 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 			Type           config.ServiceType
 			Token          string
 			BindAddr       string
-			ControlChannel int32
+			ControlChannel string
 			DataChannel    int32
 		}{
 			Name:     k,
@@ -175,7 +175,7 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 		if cc != nil {
 			ncc, ok := cc.(*ControlChannel)
 			if ok {
-				svc.ControlChannel += 1
+				svc.ControlChannel = ncc.ClientAddr()
 				svc.DataChannel = ncc.NumDataChannel()
 			}
 		}

@@ -214,6 +214,10 @@ func (cc *ControlChannel) NumDataChannel() int32 {
 	return cc.num_data_channel
 }
 
+func (cc *ControlChannel) ClientAddr() string {
+	return cc.connection.RemoteAddr().String()
+}
+
 func run_tcp_loop(cc *ControlChannel, datachannel_req_chan chan<- bool, err_chan chan error) {
 	fmt.Println("cc run_tcp_loop start")
 
