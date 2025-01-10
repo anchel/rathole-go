@@ -52,6 +52,10 @@ func SetConfigPath(p string) {
 }
 
 func GetConfig() (*Config, error) {
+	if !HasReadWritePermission(configPath) {
+		fmt.Println("config file not exist or no permission")
+		return nil, errors.New("配置文件不存在或无读写权限")
+	}
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		fmt.Println("ReadFile error", err)
@@ -80,4 +84,15 @@ func WriteFile(v any) error {
 		return err
 	}
 	return nil
+}
+
+func HasReadWritePermission(filePath string) bool {
+	// 尝试以读写模式打开文件
+	f, err := os.OpenFile(filePath, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Println("Error opening file:", err)
+		return false
+	}
+	defer f.Close()
+	return true
 }

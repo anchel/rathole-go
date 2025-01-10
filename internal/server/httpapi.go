@@ -43,7 +43,7 @@ func do_httpapi(s *Server, conn *net.TCPConn, req *http.Request) {
 		if err != nil {
 			fmt.Println("Error decoding base64:", err)
 		} else {
-			writeBytes(decodedBytes, conn, false)
+			writeBytes(decodedBytes, conn, false, "image/x-icon")
 		}
 	case "/":
 		serveHome(s, conn, req)
@@ -54,7 +54,7 @@ func do_httpapi(s *Server, conn *net.TCPConn, req *http.Request) {
 		if !checkAuthorization(s, conn, req) {
 			return
 		}
-		writeBytes([]byte("add service"), conn, false)
+		writeBytes([]byte("add service"), conn, false, "text/plain")
 
 	case "/api/service/delete":
 		err := serviceDelete(s, conn, req)
@@ -111,7 +111,7 @@ func serviceDelete(s *Server, conn *net.TCPConn, req *http.Request) error {
 	_, ok := conf.Server.Services[st.Service]
 	if !ok {
 		fmt.Println("service not exists", st.Service)
-		err = writeBytes([]byte(`{"code": 1, "message": "service not exists"}`), conn, true)
+		err = writeBytes([]byte(`{"code": 1, "message": "service not exists"}`), conn, true, "application/json")
 		if err != nil {
 			fmt.Println("writeBytes fail", err)
 		}
@@ -126,7 +126,7 @@ func serviceDelete(s *Server, conn *net.TCPConn, req *http.Request) error {
 		return err
 	}
 
-	return writeBytes([]byte(`{"code": 0, "message": "success"}`), conn, true)
+	return writeBytes([]byte(`{"code": 0, "message": "success"}`), conn, true, "application/json")
 }
 
 func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
@@ -198,7 +198,7 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 		return err
 	}
 
-	err = writeBytes(buf.Bytes(), conn, false)
+	err = writeBytes(buf.Bytes(), conn, false, "text/html")
 	if err != nil {
 		fmt.Println("writeBytes fail", err)
 	}
@@ -309,14 +309,24 @@ func serveFrontend(req *http.Request, conn *net.TCPConn) error {
 		}
 		return err
 	}
-	err = writeBytes(bs, conn, false)
+	contentType := ""
+	if strings.HasSuffix(uri, ".js") {
+		contentType = "text/javascript; charset=utf-8"
+	} else if strings.HasSuffix(uri, ".css") {
+		contentType = "text/css; charset=utf-8"
+	} else if strings.HasSuffix(uri, ".png") {
+		contentType = "image/png"
+	} else if strings.HasSuffix(uri, ".ico") {
+		contentType = "image/x-icon"
+	}
+	err = writeBytes(bs, conn, false, contentType)
 	if err != nil {
 		fmt.Println("writeBytes fail", err)
 	}
 	return err
 }
 
-func writeBytes(bs []byte, conn *net.TCPConn, isJson bool) error {
+func writeBytes(bs []byte, conn *net.TCPConn, isJson bool, contentType string) error {
 	buf := bytes.NewBuffer(bs)
 	rc := &ByteBufferReadCloser{buf}
 
@@ -332,6 +342,9 @@ func writeBytes(bs []byte, conn *net.TCPConn, isJson bool) error {
 	}
 	if isJson {
 		resp.Header.Set("Content-Type", "application/json")
+	}
+	if contentType != "" {
+		resp.Header.Set("Content-Type", contentType)
 	}
 
 	err := common.ResponseWriteWithBuffered(resp, conn)
