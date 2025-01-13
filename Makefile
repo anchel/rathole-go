@@ -22,6 +22,9 @@ linux-amd64:
 linux-arm64:
 	GOARCH=arm64 GOOS=linux $(GOBUILD) -o $(BUILD_DIR)/$(NAME)-$@
 
+linux-arm-v5:
+	GOOS=linux GOARCH=arm GOARM=5 $(GOBUILD) -o $(BUILD_DIR)/$(NAME)-$@
+
 windows-amd64:
 	GOARCH=amd64 GOOS=windows $(GOBUILD) -o $(BUILD_DIR)/$(NAME)-$@.exe
 
