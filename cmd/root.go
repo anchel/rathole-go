@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,9 +14,8 @@ import (
 	"github.com/anchel/rathole-go/internal/server"
 	"github.com/anchel/rathole-go/internal/updater"
 	"github.com/spf13/cobra"
-
-	"net/http"
-	_ "net/http/pprof"
+	// "net/http"
+	// _ "net/http/pprof"
 )
 
 var (
@@ -85,9 +83,9 @@ func Run(configPath string) error {
 		run_client(rootCtx, signalChan, updater, conf)
 	case common.RUN_SERVER:
 		fmt.Println("run as a server")
-		go func() {
-			log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-		}()
+		// go func() {
+		// 	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+		// }()
 		run_server(rootCtx, signalChan, updater, conf)
 	default:
 		fmt.Println("unknown runmode")
