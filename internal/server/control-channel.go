@@ -196,6 +196,10 @@ func (cc *ControlChannel) do_send_create_datachannel(datachannel_req_chan chan b
 }
 
 func (cc *ControlChannel) do_send_heartbeat_to_client(err_chan chan error) {
+	defer func() {
+		fmt.Println("cc do_send_heartbeat_to_client end")
+	}()
+
 	for {
 		select {
 		case <-cc.cancelCtx.Done():
@@ -422,23 +426,6 @@ func (cc *ControlChannel) run_udp_loop(datachannel_req_chan chan<- bool, err_cha
 					}
 				}
 				timer.Reset(3 * time.Second)
-				// fmt.Println("cc run_udp_loop speed monitor timer.Reset", sr)
-
-				// case <-ticker.C:
-				// 	elapsed := time.Since(start)
-				// 	r := float64(counter) / elapsed.Seconds()
-				// 	fmt.Println("cc run_udp_loop speed monitor counter:", counter, ", ", r, "packet/s")
-				// 	counter = 0
-				// 	start = time.Now()
-
-				// 	if len(cc.datachannelConnMap) > 0 && r < speed_monitor/2 {
-				// 		fmt.Println("cc run_udp_loop speed monitor, clientConnMap is not empty and speed r < ", speed_monitor/2, ", reduce datachannel")
-				// 		select {
-				// 		case <-cc.cancelCtx.Done():
-				// 			return
-				// 		case reduce_trigger_chan <- true:
-				// 		}
-				// 	}
 			}
 		}
 	}()
@@ -478,7 +465,7 @@ func (cc *ControlChannel) run_udp_loop(datachannel_req_chan chan<- bool, err_cha
 				case <-cc.cancelCtx.Done():
 					return
 				case dcConn.FinishChan <- true:
-				default:
+					close(dcConn.FinishChan) // 这里需要关闭，因为有多处地方会读取这个chan，而容量为1不足以支持多处读取
 				}
 				delete(cc.datachannelConnMap, addr)
 				cc.num_data_channel -= 1
@@ -516,6 +503,10 @@ func (cc *ControlChannel) acquire_data_channel(datachannel_req_chan chan<- bool)
 	local_data_chan := make(chan *common.MyTcpConn)
 
 	go func() {
+		defer func() {
+			fmt.Println("cc acquire_data_channel select end")
+		}()
+
 		select {
 		case <-cc.cancelCtx.Done():
 			return
@@ -561,6 +552,10 @@ func (cc *ControlChannel) forward_udp_in_and_out(udpConnListening *net.UDPConn, 
 
 	local_err_chan := make(chan error, 3)
 	go func() {
+		defer func() {
+			fmt.Println("datachannel forward_udp_in_and_out udpConnListening.ReadFromUDP end")
+		}()
+
 		for {
 			payload := make([]byte, 8192)
 			n, addr, err := udpConnListening.ReadFromUDP(payload)
@@ -645,6 +640,8 @@ func (cc *ControlChannel) read_packet_from_tcpconn(dcConn *DatachannelConn, outb
 			select {
 			case <-ctx.Done():
 				return
+			case <-dcConn.FinishChan:
+				return
 			case localCh <- &common.UdpPacket{Payload: payload[:n], Addr: addr}:
 			}
 		}
@@ -654,9 +651,13 @@ func (cc *ControlChannel) read_packet_from_tcpconn(dcConn *DatachannelConn, outb
 		select {
 		case <-ctx.Done():
 			return
+		case <-dcConn.FinishChan:
+			return
 		case packet := <-localCh:
 			select {
 			case <-ctx.Done():
+				return
+			case <-dcConn.FinishChan:
 				return
 			case outboundChan <- packet:
 			}
@@ -674,6 +675,8 @@ func (cc *ControlChannel) write_packet_to_tcpconn(dcConn *DatachannelConn, incom
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-dcConn.FinishChan:
 			return
 		case packet := <-incomingPacketChan:
 			n, err := dcConn.ClientTcpConn.WritePacket(packet.Payload, packet.Addr)
