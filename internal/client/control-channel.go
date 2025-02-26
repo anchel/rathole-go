@@ -24,6 +24,15 @@ type ControlChannel struct {
 
 	muCancel sync.Mutex
 	canceled bool
+
+	inboundPacketChan  chan *common.UdpPacket // for udp
+	outboundPacketChan chan *common.UdpPacket // for udp
+
+	once     sync.Once // only for udp
+	err_chan chan error
+
+	udpConnMap      map[string]*net.UDPConn
+	udpConnMapMutex sync.Mutex
 }
 
 type RunDataChannelArgs struct {
@@ -39,6 +48,13 @@ func NewControlChannel(clientCtx *context.Context, svcName string, svcConfig *co
 		svcConfig: svcConfig,
 		cancelCtx: cancelCtx,
 		cancel:    cancel,
+
+		inboundPacketChan:  make(chan *common.UdpPacket, 32),
+		outboundPacketChan: make(chan *common.UdpPacket, 32),
+
+		err_chan: make(chan error, 3),
+
+		udpConnMap: make(map[string]*net.UDPConn),
 	}
 }
 
@@ -115,10 +131,9 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	}
 
 	cmd_chan := make(chan string, 6)
-	err_chan := make(chan error, 3)
 
-	go cc.do_read_cmd(br, cmd_chan, err_chan)
-	go cc.do_send_heartbeat_to_server(conn, err_chan)
+	go cc.do_read_cmd(br, cmd_chan, cc.err_chan)
+	go cc.do_send_heartbeat_to_server(conn, cc.err_chan)
 
 	timer := time.NewTimer(120 * time.Second)
 
@@ -134,7 +149,7 @@ OUTER:
 			fmt.Println("cc receive cancel")
 			break OUTER
 
-		case <-err_chan:
+		case <-cc.err_chan:
 			fmt.Println("cc select error")
 			needReconnect = true
 			break OUTER
@@ -147,7 +162,7 @@ OUTER:
 					sessionKey: session_key,
 				}
 
-				go create_data_channel(cc.cancelCtx, args)
+				go cc.create_data_channel(cc.cancelCtx, args)
 			} else { // "heartbeat"
 				fmt.Println("cc recv server cmd heartbeat")
 			}
@@ -216,7 +231,11 @@ func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn, err_chan ch
 	}
 }
 
-func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) error {
+func (cc *ControlChannel) create_data_channel(parentCtx context.Context, args RunDataChannelArgs) error {
+	defer func() {
+		fmt.Println("datachannel create_data_channel end")
+	}()
+
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -266,9 +285,9 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 	fmt.Println("datachannel do handshake ok", forwardType)
 
 	if forwardType == "tcp" {
-		forward_data_channel_for_tcp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
+		cc.forward_data_channel_for_tcp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
 	} else if forwardType == "udp" {
-		forward_data_channel_for_udp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
+		cc.forward_data_channel_for_udp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
 	} else {
 		fmt.Println("unknown forward type", forwardType)
 	}
@@ -276,7 +295,7 @@ func create_data_channel(parentCtx context.Context, args RunDataChannelArgs) err
 	return nil
 }
 
-func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
+func (cc *ControlChannel) forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
 	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
 	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
 
@@ -307,98 +326,84 @@ func forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpC
 	}
 }
 
-func forward_data_channel_for_udp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
+func (cc *ControlChannel) forward_data_channel_for_udp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
 	defer func() {
 		fmt.Println("datachannel forward_data_channel_for_udp end")
 	}()
 
-	laddr, err := net.ResolveUDPAddr(network, localAddr)
+	var err error
+
+	targetLocalAddr, err := net.ResolveUDPAddr(network, localAddr)
 	if err != nil {
 		fmt.Println("datachannel forward_data_channel_for_udp localAddr invalid", err)
 		return
 	}
 
-	incomingPacketChan := make(chan *common.UdpPacket, 32)  // tcp 连接收到的包
-	outcomingPacketChan := make(chan *common.UdpPacket, 32) // 需要通过tcp连接发送的包
-	err_chan := make(chan error, 3)
+	cc.once.Do(func() {
+		fmt.Println("datachannel forward_data_channel_for_udp once.Do")
+		go cc.forward_udp_inbound(ctx, targetLocalAddr, network, cc.err_chan)
+	})
 
-	go read_packet_from_tcpconn(ctx, remoteConn, incomingPacketChan, err_chan)
-	go write_packet_to_tcpconn(ctx, remoteConn, outcomingPacketChan, err_chan)
+	local_err_chan := make(chan error, 3)
+	go cc.read_packet_from_tcpconn(ctx, remoteConn, cc.inboundPacketChan, local_err_chan)
+	go cc.write_packet_to_tcpconn(ctx, remoteConn, cc.outboundPacketChan, local_err_chan)
 
-	mu := sync.Mutex{}
-	mapping := make(map[string]chan *common.UdpPacket)
-
-label_for_outer:
 	for {
 		select {
 		case <-ctx.Done():
-			break label_for_outer
-
-		case <-err_chan:
-			break label_for_outer
-
-		case remotePacket := <-incomingPacketChan:
-			rAddrStr := remotePacket.Addr.String()
-			mu.Lock()
-			_, ok := mapping[rAddrStr]
-			mu.Unlock()
-
-			if !ok {
-				inboundChan := make(chan *common.UdpPacket, 32)
-				randAddr, err := net.ResolveUDPAddr(network, "") // 随机端口
-				if err != nil {
-					fmt.Println("datachannel forward_data_channel_for_udp resolveudpaddr error", err)
-					break label_for_outer
-				}
-				udpConn, err := net.ListenUDP(network, randAddr) // todo 这里的监听地址，需要改成其他机器能访问的
-				if err != nil {
-					fmt.Println("datachannel forward_data_channel_for_udp ListenUDP fail", err)
-					break label_for_outer
-				}
-				fmt.Println("datachannel forward_data_channel_for_udp ListenUDP LocalAddr", udpConn.LocalAddr())
-				mu.Lock()
-				mapping[rAddrStr] = inboundChan
-				mu.Unlock()
-				go forward_udp_in_and_out(ctx, udpConn, inboundChan, outcomingPacketChan, err_chan, remotePacket.Addr, laddr)
-			}
-			mu.Lock()
-			inboundPacketChan, ok := mapping[rAddrStr]
-			mu.Unlock()
-			if ok {
-				select {
-				case <-ctx.Done():
-					break label_for_outer
-				case inboundPacketChan <- remotePacket:
-				}
-			}
+			return
+		case e := <-local_err_chan:
+			fmt.Println("datachannel forward_data_channel_for_udp err_chan", e)
+			return
 		}
 	}
 }
 
-func read_packet_from_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, inboundChan chan *common.UdpPacket, err_chan chan error) {
+func (cc *ControlChannel) read_packet_from_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, inboundChan chan *common.UdpPacket, err_chan chan error) {
 	defer func() {
 		fmt.Println("datachannel read_packet_from_tcpconn end")
 	}()
 
-	for {
-		p := make([]byte, 8192)
-		remoteAddr, n, err := tcpConn.ReadPacket(p)
-		if err != nil {
-			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket error", err)
-			common.SendError(ctx, err_chan, err)
-			return
-		}
-		fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket", n, "packet.Addr:", remoteAddr)
+	localCh := make(chan *common.UdpPacket, 32)
 
+	go func() {
+		defer func() {
+			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket end")
+		}()
+
+		for {
+			p := make([]byte, 8192)
+			remoteAddr, n, err := tcpConn.ReadPacket(p)
+			if err != nil {
+				fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket error", err)
+				common.SendError(ctx, err_chan, err)
+				return
+			}
+			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket", n, "packet.Addr:", remoteAddr)
+
+			select {
+			case <-ctx.Done():
+				return
+			case localCh <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
+			}
+		}
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case inboundChan <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
+		case packet := <-localCh:
+			select {
+			case <-ctx.Done():
+				return
+			case inboundChan <- packet:
+			}
 		}
 	}
 }
 
-func write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, outcomingPacketChan chan *common.UdpPacket, err_chan chan error) {
+func (cc *ControlChannel) write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, outboundChan chan *common.UdpPacket, err_chan chan error) {
 	defer func() {
 		fmt.Println("datachannel write_packet_to_tcpconn end")
 	}()
@@ -407,7 +412,7 @@ func write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, out
 		select {
 		case <-ctx.Done():
 			return
-		case packet := <-outcomingPacketChan:
+		case packet := <-outboundChan:
 			n, err := tcpConn.WritePacket(packet.Payload, packet.Addr)
 			if err != nil {
 				fmt.Println("datachannel write_packet_to_tcpconn tcpConn.WritePacket error", err)
@@ -419,38 +424,100 @@ func write_packet_to_tcpconn(ctx context.Context, tcpConn *common.MyTcpConn, out
 	}
 }
 
-func forward_udp_in_and_out(ctx context.Context, udpConn *net.UDPConn, inboundChan chan *common.UdpPacket, outboundChan chan *common.UdpPacket, err_chan chan error, remoteAddr *common.Address, localAddr *net.UDPAddr) {
+func (cc *ControlChannel) forward_udp_inbound(ctx context.Context, targetLocalAddr *net.UDPAddr, network string, err_chan chan error) {
 	defer func() {
-		fmt.Println("datachannel forward_udp_in_and_out end")
+		fmt.Println("datachannel forward_udp_inbound end")
 	}()
 
-	local_err_chan := make(chan error, 3)
+	var err error
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case inboundPacket := <-cc.inboundPacketChan:
+			rAddrStr := inboundPacket.Addr.String()
+
+			cc.udpConnMapMutex.Lock()
+
+			udpConn, ok := cc.udpConnMap[rAddrStr]
+
+			if !ok {
+				fmt.Println("datachannel forward_udp_inbound udpConn not exist, create new udpConn, rAddrStr:", rAddrStr)
+				var randAddr *net.UDPAddr
+				randAddr, err = net.ResolveUDPAddr(network, "") // 随机端口
+				if err != nil {
+					fmt.Println("datachannel forward_udp_inbound resolve udp addr error", err)
+					common.SendError(ctx, err_chan, err)
+					return
+				}
+				udpConn, err = net.ListenUDP(network, randAddr)
+				if err != nil {
+					fmt.Println("datachannel forward_udp_inbound ListenUDP fail", err)
+					common.SendError(ctx, err_chan, err)
+					return
+				}
+				fmt.Println("datachannel forward_udp_inbound ListenUDP LocalAddr", udpConn.LocalAddr())
+
+				cc.udpConnMap[rAddrStr] = udpConn
+
+				go cc.forward_udp_outbound(ctx, udpConn, cc.outboundPacketChan, inboundPacket.Addr, targetLocalAddr)
+			}
+
+			cc.udpConnMapMutex.Unlock()
+
+			n, err := udpConn.WriteToUDP(inboundPacket.Payload, targetLocalAddr)
+			if err != nil {
+				fmt.Println("datachannel forward_udp_inbound udpConn.WriteToUDP error", err)
+				common.SendError(ctx, err_chan, err)
+				return
+			}
+			fmt.Println("datachannel forward_udp_inbound udpConn.WriteToUDP success", n, "inboundPacket.Addr:", inboundPacket.Addr)
+		}
+	}
+}
+
+func (cc *ControlChannel) forward_udp_outbound(ctx context.Context, udpConn *net.UDPConn, outboundPacketChan chan *common.UdpPacket, remoteAddr *common.Address, targetLocalAddr *net.UDPAddr) {
+	fmt.Println("datachannel forward_udp_outbound start, remoteAddr:", remoteAddr.String(), "localAddr:", targetLocalAddr.String())
+
+	defer func() {
+		fmt.Println("datachannel forward_udp_outbound end, start cleanup udpConn, remoteAddr:", remoteAddr.String(), "localAddr:", targetLocalAddr.String())
+		// cleanup udpConn
+		err := udpConn.Close()
+		if err != nil {
+			fmt.Println("datachannel forward_udp_outbound end udpConn.Close error", err)
+		}
+		cc.udpConnMapMutex.Lock()
+		delete(cc.udpConnMap, remoteAddr.String())
+		cc.udpConnMapMutex.Unlock()
+	}()
+
+	localCh := make(chan *common.UdpPacket, 32)
 
 	go func() {
 		defer func() {
-			fmt.Println("datachannel forward_udp_in_and_out clientUDPConn.ReadFrom end")
+			fmt.Println("datachannel forward_udp_outbound udpConn.ReadFromUDP end")
 		}()
 
 		for {
 			p := make([]byte, 8192)
 			n, addr, err := udpConn.ReadFromUDP(p)
 			if err != nil {
-				fmt.Println("datachannel forward_udp_in_and_out clientUDPConn.ReadFrom error", err)
-				common.SendError(ctx, local_err_chan, err)
+				fmt.Println("datachannel forward_udp_outbound clientUDPConn.ReadFrom error", err)
 				return
 			}
 
-			fmt.Println("datachannel forward_udp_in_and_out udpConn.ReadFromUDP success", n, "from:", addr)
+			fmt.Println("datachannel forward_udp_outbound udpConn.ReadFromUDP success", n, "from:", addr)
 
-			if addr.String() != localAddr.String() {
-				fmt.Println("datachannel forward_udp_in_and_out addr not equal, packet.Addr", addr.String(), "expect:", localAddr)
+			if addr.String() != targetLocalAddr.String() {
+				fmt.Println("datachannel forward_udp_outbound addr not equal, packet.Addr", addr.String(), "expect:", targetLocalAddr)
 				continue
 			}
 
 			select {
 			case <-ctx.Done():
 				return
-			case outboundChan <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
+			case localCh <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
 			}
 		}
 	}()
@@ -459,19 +526,12 @@ func forward_udp_in_and_out(ctx context.Context, udpConn *net.UDPConn, inboundCh
 		select {
 		case <-ctx.Done():
 			return
-
-		case err := <-local_err_chan:
-			common.SendError(ctx, err_chan, err)
-			return
-
-		case packet := <-inboundChan:
-			n, err := udpConn.WriteToUDP(packet.Payload, localAddr)
-			if err != nil {
-				fmt.Println("datachannel forward_udp_in_and_out udpConn.WriteToUDP error", err)
-				common.SendError(ctx, err_chan, err)
+		case packet := <-localCh:
+			select {
+			case <-ctx.Done():
 				return
+			case outboundPacketChan <- packet:
 			}
-			fmt.Println("datachannel forward_udp_in_and_out udpConn.WriteToUDP success", n, "packet.Addr:", packet.Addr)
 		}
 	}
 }

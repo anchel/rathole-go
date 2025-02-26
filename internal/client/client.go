@@ -91,6 +91,8 @@ label_for:
 	}
 
 	client.wg.Wait()
+
+	time.Sleep(1 * time.Second) // wait for all goroutines to finish
 	fmt.Println("client goto shutdown")
 }
 
