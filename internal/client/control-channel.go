@@ -284,11 +284,12 @@ func (cc *ControlChannel) create_data_channel(parentCtx context.Context, args Ru
 
 	fmt.Println("datachannel do handshake ok", forwardType)
 
-	if forwardType == "tcp" {
+	switch forwardType {
+	case "tcp":
 		cc.forward_data_channel_for_tcp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
-	} else if forwardType == "udp" {
+	case "udp":
 		cc.forward_data_channel_for_udp(ctx, myconn, args.svcConfig.LocalAddr, forwardType)
-	} else {
+	default:
 		fmt.Println("unknown forward type", forwardType)
 	}
 

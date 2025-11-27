@@ -117,6 +117,7 @@ label_for:
 			}
 		}
 	}
+
 	err = l.Close()
 	if err != nil {
 		fmt.Println("server close fail", err)
@@ -127,10 +128,16 @@ label_for:
 }
 
 func serveConnection(s *Server, conn *net.TCPConn) {
+	// 设置读取超时，防止恶意连接占用资源
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	reader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(reader)
+	// 读取完成后清除超时设置，后续处理根据需要自行设置
+	conn.SetReadDeadline(time.Time{})
+
 	if err != nil {
 		fmt.Println("recv hello cmd fail", err)
+		conn.Close()
 		return
 	}
 	uri := req.URL.Path
@@ -145,7 +152,12 @@ func serveConnection(s *Server, conn *net.TCPConn) {
 }
 
 func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Reader, req *http.Request) {
-	defer conn.Close()
+	defer func(conn *net.TCPConn) {
+		err := conn.Close()
+		if err != nil {
+			fmt.Println("close control channel fail", err)
+		}
+	}(conn)
 
 	serviceDigest := req.Header.Get("service")
 	if len(serviceDigest) <= 0 {

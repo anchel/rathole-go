@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anchel/rathole-go/internal/common"
@@ -226,7 +227,7 @@ func (cc *ControlChannel) do_send_heartbeat_to_client(err_chan chan error) {
 }
 
 func (cc *ControlChannel) NumDataChannel() int32 {
-	return cc.num_data_channel
+	return atomic.LoadInt32(&cc.num_data_channel)
 }
 
 func (cc *ControlChannel) ClientAddr() string {
@@ -301,14 +302,14 @@ func (cc *ControlChannel) forward_tcp_connection(remoteConn *net.TCPConn, datach
 	}
 
 	fmt.Println("成功取得客户的连接", clientTCPConn.RemoteAddr())
-	cc.num_data_channel += 1
+	atomic.AddInt32(&cc.num_data_channel, 1)
 
 	defer func() {
 		err := clientTCPConn.Close()
 		if err != nil {
 			fmt.Println("forward_tcp_connection clientTCPConn.Close error", err)
 		}
-		cc.num_data_channel -= 1
+		atomic.AddInt32(&cc.num_data_channel, -1)
 	}()
 
 	err := common.CopyTcpConnection(cc.cancelCtx, clientTCPConn, remoteConn)
@@ -450,7 +451,7 @@ func (cc *ControlChannel) run_udp_loop(datachannel_req_chan chan<- bool, err_cha
 			fmt.Println("cc run_udp_loop create datachannel success", clientTCPConn.RemoteAddr())
 			datachannelConn := &DatachannelConn{ClientTcpConn: clientTCPConn, FinishChan: make(chan bool, 1)}
 			cc.datachannelConnMap[clientTCPConn.RemoteAddr().String()] = datachannelConn
-			cc.num_data_channel += 1
+			atomic.AddInt32(&cc.num_data_channel, 1)
 			go cc.do_with_datachannel(datachannelConn)
 
 		case <-reduce_trigger_chan:
@@ -468,7 +469,7 @@ func (cc *ControlChannel) run_udp_loop(datachannel_req_chan chan<- bool, err_cha
 					close(dcConn.FinishChan) // 这里需要关闭，因为有多处地方会读取这个chan，而容量为1不足以支持多处读取
 				}
 				delete(cc.datachannelConnMap, addr)
-				cc.num_data_channel -= 1
+				atomic.AddInt32(&cc.num_data_channel, -1)
 				break
 			}
 		}
@@ -500,47 +501,45 @@ func (cc *ControlChannel) acquire_data_channel(datachannel_req_chan chan<- bool)
 		fmt.Println("cc acquire_data_channel end")
 	}()
 
-	local_data_chan := make(chan *common.MyTcpConn)
+	timer := time.NewTimer(6 * time.Second)
+	defer timer.Stop()
 
-	go func() {
-		defer func() {
-			fmt.Println("cc acquire_data_channel select end")
-		}()
+	var conn net.Conn
 
-		select {
-		case <-cc.cancelCtx.Done():
-			return
-		case datachannel_req_chan <- true:
-		}
-
-		var clientTCPConn *common.MyTcpConn
-		var ok bool
-		select {
-		case <-cc.cancelCtx.Done():
-			return
-		case conn := <-cc.data_chan:
-			clientTCPConn, ok = conn.(*common.MyTcpConn)
-			if !ok {
-				fmt.Println("cc run_udp_loop 获取的客户的连接不是tcp连接")
-				return
-			}
-		}
-
-		select {
-		case <-cc.cancelCtx.Done():
-			return
-		case local_data_chan <- clientTCPConn:
-		}
-	}()
-
+	// 1. 尝试发送请求，同时监听是否有现成连接
+	// 这种写法涵盖了"data_chan中已有连接"的情况，此时可以直接获取而无需发送请求
 	select {
 	case <-cc.cancelCtx.Done():
 		return nil
-	case conn := <-local_data_chan:
-		return conn
-	case <-time.After(6 * time.Second):
+	case <-timer.C:
+		return nil
+	case conn = <-cc.data_chan:
+		// 在发送请求前（或同时）收到了连接，直接复用，跳过发送请求步骤
+		goto VerifyConn
+	case datachannel_req_chan <- true:
+		// 请求发送成功，继续等待连接
+	}
+
+	// 2. 等待连接返回
+	select {
+	case <-cc.cancelCtx.Done():
+		return nil
+	case <-timer.C:
+		return nil
+	case conn = <-cc.data_chan:
+		// 成功获取连接
+	}
+
+VerifyConn:
+	clientTCPConn, ok := conn.(*common.MyTcpConn)
+	if !ok {
+		fmt.Println("cc acquire_data_channel 获取的客户的连接不是tcp连接")
+		if conn != nil {
+			conn.Close()
+		}
 		return nil
 	}
+	return clientTCPConn
 }
 
 func (cc *ControlChannel) forward_udp_in_and_out(udpConnListening *net.UDPConn, inboundChan chan *common.UdpPacket, outboundChan chan *common.UdpPacket, counter_chan chan bool, err_chan chan error) {
