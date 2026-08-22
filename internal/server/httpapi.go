@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/anchel/rathole-go/internal/common"
@@ -154,8 +156,11 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 		}
 	}{}
 
-	renderData.BindAddr = s.config.BindAddr
-	for k, v := range s.config.Services {
+	// 在锁内取一份快照再渲染。直接遍历 s.config.Services 会和热更新的写操作构成数据竞争。
+	bindAddr, services := s.configSnapshot()
+
+	renderData.BindAddr = bindAddr
+	for _, v := range services {
 		svc := struct {
 			Name           string
 			Type           config.ServiceType
@@ -164,14 +169,14 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 			ControlChannel string
 			DataChannel    int32
 		}{
-			Name:     k,
+			Name:     v.Name,
 			Type:     v.Type,
 			Token:    v.Token,
 			BindAddr: v.BindAddr,
 		}
 
-		serviceDigest := common.CalSha256(k)
-		cc := s.controlChannelManager.Get(serviceDigest, "")
+		serviceDigest := common.CalSha256(v.Name)
+		cc := s.controlChannelManager.GetByKey1(serviceDigest)
 		if cc != nil {
 			ncc, ok := cc.(*ControlChannel)
 			if ok {
@@ -206,39 +211,30 @@ func serveHome(s *Server, conn *net.TCPConn, req *http.Request) error {
 }
 
 func checkAuthorization(s *Server, conn *net.TCPConn, req *http.Request) bool {
+	expectUser, expectPass := s.authCredentials()
+
 	// 如果未启用认证，直接返回 true
-	if !s.authEnabled() {
+	if len(expectUser) == 0 && len(expectPass) == 0 {
 		return true
 	}
 
-	// 检查请求是否包含 Authorization 头
-	authHeader := req.Header.Get("Authorization")
-
-	fmt.Println("Authorization:", authHeader)
-
-	// 如果没有提供 Authorization 头，返回 401 未授权错误，并设置 WWW-Authenticate 头
-	if authHeader == "" {
-		fmt.Println("Authorization is empty")
-		err := auth(conn)
-		if err != nil {
-			fmt.Println("auth fail", err)
-		}
-		return false
-	}
-	// 检查 Authorization 头的用户名和密码
+	// 注意：Authorization 头、用户名、密码都不能打进日志，
+	// 那等于把管理密码留在日志文件里。
 	username, password, ok := req.BasicAuth()
 	if !ok {
-		fmt.Println("parse Authorization fail")
+		fmt.Println("Authorization 缺失或无法解析")
 		err := auth(conn)
 		if err != nil {
 			fmt.Println("auth fail", err)
 		}
 		return false
 	}
-	fmt.Println("username:", username, "password:", password)
 
-	// 如果用户名和密码不匹配，返回 401 未授权错误，并设置 WWW-Authenticate 头
-	if username != s.config.AuthUsername || password != s.config.AuthPassword {
+	// 用恒定时间比较，避免逐字节比较带来的时序侧信道。
+	// 两个都要算，不能短路，否则用户名错时的耗时和密码错时不一样。
+	userOk := subtle.ConstantTimeCompare([]byte(username), []byte(expectUser)) == 1
+	passOk := subtle.ConstantTimeCompare([]byte(password), []byte(expectPass)) == 1
+	if !userOk || !passOk {
 		fmt.Println("username or password not match")
 		err := auth(conn)
 		if err != nil {
@@ -298,7 +294,12 @@ func notFound(conn *net.TCPConn) error {
 }
 
 func serveFrontend(req *http.Request, conn *net.TCPConn) error {
-	uri := strings.TrimPrefix(req.URL.Path, "/")
+	// http.ReadRequest 不会规范化路径，这里先 Clean 再确认仍落在 fe/ 下面，
+	// 避免 /fe/../xxx 这类路径绕出静态资源目录。
+	uri := path.Clean(strings.TrimPrefix(req.URL.Path, "/"))
+	if !strings.HasPrefix(uri, "fe/") {
+		return notFound(conn)
+	}
 
 	bs, err := frontend.ReadFile(uri)
 	if err != nil {

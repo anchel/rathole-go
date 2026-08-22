@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -21,6 +22,15 @@ type Service struct {
 	svcType   config.ServiceType
 	token     string
 	bind_addr string
+}
+
+// ServiceView 是配置的只读快照，给 http 管理页用。
+// 直接读 s.config 会和热更新的写操作构成数据竞争。
+type ServiceView struct {
+	Name     string
+	Type     config.ServiceType
+	Token    string
+	BindAddr string
 }
 
 type Server struct {
@@ -51,10 +61,13 @@ func NewServer(parentCtx context.Context, conf *config.ServerConfig) *Server {
 }
 
 func (s *Server) Run(sigChan chan os.Signal, updater chan *config.Config) {
+	s.mu.Lock()
 	s.init()
+	s.mu.Unlock()
 	s.acceptLoop(sigChan, updater)
 }
 
+// init 重建服务索引，调用方必须持有 s.mu。
 func (s *Server) init() {
 	s.services = make(map[Digest]*Service)
 	for k, v := range s.config.Services {
@@ -77,9 +90,43 @@ func (s *Server) Cancel() {
 	}
 }
 
+// configSnapshot 在锁内拷贝一份配置，供 http 管理页读取。
+func (s *Server) configSnapshot() (string, []ServiceView) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	views := make([]ServiceView, 0, len(s.config.Services))
+	for k, v := range s.config.Services {
+		views = append(views, ServiceView{
+			Name:     k,
+			Type:     v.Type,
+			Token:    v.Token,
+			BindAddr: v.BindAddr,
+		})
+	}
+	return s.config.BindAddr, views
+}
+
+func (s *Server) authCredentials() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.config.AuthUsername, s.config.AuthPassword
+}
+
+func (s *Server) lookupService(serviceDigest string) (*Service, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	service, ok := s.services[Digest(serviceDigest)]
+	return service, ok
+}
+
 func (s *Server) acceptLoop(sigChan chan os.Signal, updater chan *config.Config) {
 
-	tcpAddr, _ := net.ResolveTCPAddr("tcp", s.config.BindAddr)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", s.config.BindAddr)
+	if err != nil {
+		fmt.Println("server bind_addr invalid", s.config.BindAddr, err)
+		return
+	}
 	l, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		fmt.Println("server listen fail", err)
@@ -131,6 +178,7 @@ func serveConnection(s *Server, conn *net.TCPConn) {
 	req, err := http.ReadRequest(reader)
 	if err != nil {
 		fmt.Println("recv hello cmd fail", err)
+		conn.Close()
 		return
 	}
 	uri := req.URL.Path
@@ -138,25 +186,27 @@ func serveConnection(s *Server, conn *net.TCPConn) {
 	case "/control/hello":
 		do_control_channel_handshake(s, conn, reader, req)
 	case "/data/hello":
-		do_data_channel_handshake(s, conn, req)
+		do_data_channel_handshake(s, conn, reader, req)
 	default:
 		do_httpapi(s, conn, req)
 	}
 }
 
 func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Reader, req *http.Request) {
-	defer conn.Close()
+	handshakeOk := false
+	defer func() {
+		// 握手没走完的连接在这里关掉；走完之后连接的所有权交给 ControlChannel。
+		if !handshakeOk {
+			conn.Close()
+		}
+	}()
 
 	serviceDigest := req.Header.Get("service")
 	if len(serviceDigest) <= 0 {
 		fmt.Println("recv /control/hello service nil")
 		return
 	}
-	var service *Service
-	var ok bool
-	s.mu.Lock()
-	service, ok = s.services[Digest(serviceDigest)]
-	s.mu.Unlock()
+	service, ok := s.lookupService(serviceDigest)
 	if !ok {
 		fmt.Println("server can not find service", serviceDigest)
 		resp := &http.Response{
@@ -173,7 +223,12 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		}
 		return
 	}
-	nonce := common.RandStringRunes(16)
+
+	nonce, err := common.RandString(16)
+	if err != nil {
+		fmt.Println("server generate nonce fail", err)
+		return
+	}
 
 	resp := &http.Response{
 		Proto:      "HTTP/1.1",
@@ -184,7 +239,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		Header:     make(map[string][]string),
 	}
 	resp.Header.Set("nonce", nonce)
-	err := common.ResponseWriteWithBuffered(resp, conn)
+	err = common.ResponseWriteWithBuffered(resp, conn)
 	if err != nil {
 		fmt.Println("response /control/hello fail", err)
 		return
@@ -196,13 +251,13 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		return
 	}
 	if req.URL.Path != "/control/auth" {
-		fmt.Println("recv hello auth fail, path incorrect", err)
+		fmt.Println("recv hello auth fail, path incorrect", req.URL.Path)
 		return
 	}
 	session_key := req.Header.Get("session_key")
 	d := common.CalSha256(service.token + nonce)
-	if session_key != d {
-		fmt.Println("recv hello auth invalid", d, session_key)
+	if subtle.ConstantTimeCompare([]byte(session_key), []byte(d)) != 1 {
+		fmt.Println("recv hello auth invalid")
 		resp = &http.Response{
 			Proto:      "HTTP/1.1",
 			ProtoMajor: 1,
@@ -217,7 +272,7 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		}
 		return
 	}
-	fmt.Println("recv hello auth success", session_key)
+	fmt.Println("recv hello auth success")
 
 	resp = &http.Response{
 		Proto:      "HTTP/1.1",
@@ -233,43 +288,57 @@ func do_control_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Re
 		return
 	}
 
+	handshakeOk = true
+
 	cc := NewControlChannel(s.ctx, session_key, service, conn, reader)
 
 	s.controlChannelManager.Put(serviceDigest, session_key, cc)
 
-	defer func() {
-		s.controlChannelManager.RemoveByKey(serviceDigest, "")
-	}()
+	// 必须按对象身份摘除，不能按 serviceDigest 删。
+	// 客户端重连时新通道会用同一个 digest 注册进来，按 key 删会把刚建好的新通道干掉，
+	// 表现为「重连第一次总是被静默掐断」。
+	defer s.controlChannelManager.RemoveItem(cc)
+
 	cc.Run()
 }
 
-func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) {
-	sessionKey := req.Header.Get("session_key")
+func do_data_channel_handshake(s *Server, conn *net.TCPConn, reader *bufio.Reader, req *http.Request) {
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			if err := conn.Close(); err != nil {
+				fmt.Println("close connection fail", err)
+			}
+		}
+	}()
 
-	r := s.controlChannelManager.Get("", sessionKey)
+	sessionKey := req.Header.Get("session_key")
 
 	var respbuf [2]byte = [2]byte{0, 0}
 
-	if r == nil {
-		fmt.Println("server sessionKey invalid", sessionKey)
-		_, err := conn.Write(respbuf[:])
-		if err != nil {
+	r := s.controlChannelManager.GetByKey2(sessionKey)
+	if sessionKey == "" || r == nil {
+		fmt.Println("server sessionKey invalid")
+		if _, err := conn.Write(respbuf[:]); err != nil {
 			fmt.Println("response /data/hello fail", err)
-		}
-		err = conn.Close()
-		if err != nil {
-			fmt.Println("close connection fail", err)
 		}
 		return
 	}
-
-	fmt.Println("server sessionKey ok", sessionKey)
 
 	cc, ok := r.(*ControlChannel)
 	if !ok {
 		fmt.Println("runnable not controchannel")
 		return
 	}
+
+	// 后续的数据包是直接从 conn 上裸读的，不走这个 bufio.Reader。
+	// 如果握手请求之后还粘了数据在缓冲区里，裸读就会从错误的位置开始解析。
+	if reader.Buffered() != 0 {
+		fmt.Println("server /data/hello 握手后存在粘包数据，拒绝该连接", reader.Buffered())
+		return
+	}
+
+	fmt.Println("server sessionKey ok")
 
 	respbuf[0] = 1 // 1-OK, 0-FAIL
 
@@ -282,10 +351,6 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 	_, err := conn.Write(respbuf[:])
 	if err != nil {
 		fmt.Println("response /data/hello fail", err)
-		err = conn.Close()
-		if err != nil {
-			fmt.Println("close connection fail", err)
-		}
 		return
 	}
 
@@ -295,6 +360,7 @@ func do_data_channel_handshake(s *Server, conn *net.TCPConn, req *http.Request) 
 	case <-s.ctx.Done():
 	case <-cc.cancelCtx.Done():
 	case cc.data_chan <- common.NewMyTcpConn(conn):
+		handedOver = true
 	}
 }
 
@@ -302,15 +368,19 @@ func (s *Server) hotUpdate(newConfig *config.Config) {
 	serverConfig := newConfig.Server
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	newServices := make([]string, 0, 6)
 	delServices := make([]string, 0, 6)
+	changedServices := make([]string, 0, 6)
 
-	for svcName := range serverConfig.Services {
-		_, ok := s.config.Services[svcName]
+	for svcName, newSvc := range serverConfig.Services {
+		oldSvc, ok := s.config.Services[svcName]
 		if !ok {
 			newServices = append(newServices, svcName)
+		} else if oldSvc != newSvc {
+			// 名字没变但 bind_addr/token/type 变了。
+			// 在跑的控制通道持有的是旧配置，不重建的话改动到重启才生效。
+			changedServices = append(changedServices, svcName)
 		}
 	}
 
@@ -323,18 +393,21 @@ func (s *Server) hotUpdate(newConfig *config.Config) {
 
 	fmt.Println("server hotUpdate newServices", newServices)
 	fmt.Println("server hotUpdate delServices", delServices)
-
-	for _, svcName := range delServices {
-		serviceDigest := common.CalSha256(svcName)
-		s.controlChannelManager.RemoveByKey(serviceDigest, "")
-	}
+	fmt.Println("server hotUpdate changedServices", changedServices)
 
 	s.config.Services = serverConfig.Services
+	s.config.BindAddr = serverConfig.BindAddr
+	s.config.AuthUsername = serverConfig.AuthUsername
+	s.config.AuthPassword = serverConfig.AuthPassword
 
 	s.init()
-}
 
-// 检查是否启用了http authorization
-func (s *Server) authEnabled() bool {
-	return len(s.config.AuthUsername) > 0 || len(s.config.AuthPassword) > 0
+	s.mu.Unlock()
+
+	// 关闭旧通道要在 s.mu 之外做：Close 会一直等到对方释放监听端口，
+	// 持锁等待会把 http 管理页和握手一起卡住。
+	for _, svcName := range append(delServices, changedServices...) {
+		serviceDigest := common.CalSha256(svcName)
+		s.controlChannelManager.RemoveByKey1(serviceDigest)
+	}
 }
