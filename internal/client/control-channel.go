@@ -3,16 +3,40 @@ package client
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anchel/rathole-go/internal/common"
 	"github.com/anchel/rathole-go/internal/config"
 	"github.com/sethvargo/go-retry"
 )
+
+const (
+	// udp 会话在这么久没有任何收发后回收，否则每个新的来源地址都会留下
+	// 一个 socket 加一个 goroutine，对公网服务来说就是持续泄漏直到 fd 耗尽。
+	udpSessionIdleTimeout = 60 * time.Second
+	// 会话数上限，兜住突发的源地址扫描
+	udpSessionMax = 512
+)
+
+// udpSession 是「某个远端来源地址」对应的本地 udp socket。
+type udpSession struct {
+	conn       *net.UDPConn
+	lastActive atomic.Int64 // unixnano
+}
+
+func (s *udpSession) touch() {
+	s.lastActive.Store(time.Now().UnixNano())
+}
+
+func (s *udpSession) idleFor() time.Duration {
+	return time.Since(time.Unix(0, s.lastActive.Load()))
+}
 
 type ControlChannel struct {
 	svcName string
@@ -31,7 +55,7 @@ type ControlChannel struct {
 	once     sync.Once // only for udp
 	err_chan chan error
 
-	udpConnMap      map[string]*net.UDPConn
+	udpConnMap      map[string]*udpSession
 	udpConnMapMutex sync.Mutex
 }
 
@@ -54,7 +78,7 @@ func NewControlChannel(clientCtx *context.Context, svcName string, svcConfig *co
 
 		err_chan: make(chan error, 3),
 
-		udpConnMap: make(map[string]*net.UDPConn),
+		udpConnMap: make(map[string]*udpSession),
 	}
 }
 
@@ -125,7 +149,12 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 
 	session_key, err := common.Do_control_channel_handshake(conn, br, cc.svcName, cc.svcConfig.Token)
 	if err != nil {
-		fmt.Println("cc Do_control_channel_handshake fail", err)
+		if errors.Is(err, common.ErrUnauthorized) {
+			// 这是配置问题不是网络问题，重连解决不了，明确提示出来
+			fmt.Println("cc 认证失败，请检查服务 [", cc.svcName, "] 的 token 是否与服务端一致")
+		} else {
+			fmt.Println("cc Do_control_channel_handshake fail", err)
+		}
 		needReconnect = true
 		return
 	}
@@ -136,21 +165,17 @@ func (cc *ControlChannel) Run(ciChan chan *ComunicationItem) {
 	go cc.do_send_heartbeat_to_server(conn, cc.err_chan)
 
 	timer := time.NewTimer(120 * time.Second)
+	defer timer.Stop()
 
 OUTER:
 	for {
-		if !timer.Stop() {
-			<-timer.C
-		}
-		timer.Reset(120 * time.Second)
-
 		select {
 		case <-cc.cancelCtx.Done():
 			fmt.Println("cc receive cancel")
 			break OUTER
 
-		case <-cc.err_chan:
-			fmt.Println("cc select error")
+		case e := <-cc.err_chan:
+			fmt.Println("cc select error", e)
 			needReconnect = true
 			break OUTER
 
@@ -166,6 +191,10 @@ OUTER:
 			} else { // "heartbeat"
 				fmt.Println("cc recv server cmd heartbeat")
 			}
+			if !timer.Stop() {
+				<-timer.C
+			}
+			timer.Reset(120 * time.Second)
 
 		case <-timer.C:
 			fmt.Println("cc recv server heartbeat timeout")
@@ -206,11 +235,14 @@ func (cc *ControlChannel) do_send_heartbeat_to_server(conn net.Conn, err_chan ch
 		fmt.Println("cc do_send_heartbeat_to_server end")
 	}()
 
+	ticker := time.NewTicker(110 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-cc.cancelCtx.Done():
 			return
-		case <-time.After(110 * time.Second):
+		case <-ticker.C:
 			fmt.Println("cc start send to server /contro/cmd heartbeat")
 			resp := &http.Response{
 				Proto:      "HTTP/1.1",
@@ -297,7 +329,11 @@ func (cc *ControlChannel) create_data_channel(parentCtx context.Context, args Ru
 }
 
 func (cc *ControlChannel) forward_data_channel_for_tcp(ctx context.Context, remoteConn *common.MyTcpConn, localAddr string, network string) {
-	tcpAdr, _ := net.ResolveTCPAddr("tcp", localAddr)
+	tcpAdr, err := net.ResolveTCPAddr("tcp", localAddr)
+	if err != nil {
+		fmt.Println("forward_data_channel_for_tcp local_addr invalid", localAddr, err)
+		return
+	}
 	fmt.Println("forward_data_channel_for_tcp", tcpAdr, localAddr)
 
 	timeout := 5 * time.Second // 设置超时时间为 5 秒
@@ -332,31 +368,30 @@ func (cc *ControlChannel) forward_data_channel_for_udp(ctx context.Context, remo
 		fmt.Println("datachannel forward_data_channel_for_udp end")
 	}()
 
-	var err error
-
 	targetLocalAddr, err := net.ResolveUDPAddr(network, localAddr)
 	if err != nil {
 		fmt.Println("datachannel forward_data_channel_for_udp localAddr invalid", err)
 		return
 	}
 
+	// 注意这里传的是 cc.cancelCtx 而不是本条数据通道的 ctx。
+	// forward_udp_inbound 是 inboundPacketChan 唯一的消费者，而 once 只会触发一次；
+	// 如果绑在第一条数据通道的 ctx 上，服务端例行回收掉那条通道时它就永久退出了，
+	// 之后所有数据通道收到的包全都没人消费，udp 转发静默变成黑洞，
+	// 而控制通道还活着不会触发重连。
 	cc.once.Do(func() {
 		fmt.Println("datachannel forward_data_channel_for_udp once.Do")
-		go cc.forward_udp_inbound(ctx, targetLocalAddr, network, cc.err_chan)
+		go cc.forward_udp_inbound(cc.cancelCtx, targetLocalAddr, network)
 	})
 
 	local_err_chan := make(chan error, 3)
 	go cc.read_packet_from_tcpconn(ctx, remoteConn, cc.inboundPacketChan, local_err_chan)
 	go cc.write_packet_to_tcpconn(ctx, remoteConn, cc.outboundPacketChan, local_err_chan)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case e := <-local_err_chan:
-			fmt.Println("datachannel forward_data_channel_for_udp err_chan", e)
-			return
-		}
+	select {
+	case <-ctx.Done():
+	case e := <-local_err_chan:
+		fmt.Println("datachannel forward_data_channel_for_udp err_chan", e)
 	}
 }
 
@@ -365,41 +400,20 @@ func (cc *ControlChannel) read_packet_from_tcpconn(ctx context.Context, tcpConn 
 		fmt.Println("datachannel read_packet_from_tcpconn end")
 	}()
 
-	localCh := make(chan *common.UdpPacket, 32)
-
-	go func() {
-		defer func() {
-			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket end")
-		}()
-
-		for {
-			p := make([]byte, 8192)
-			remoteAddr, n, err := tcpConn.ReadPacket(p)
-			if err != nil {
-				fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket error", err)
-				common.SendError(ctx, err_chan, err)
-				return
-			}
-			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket", n, "packet.Addr:", remoteAddr)
-
-			select {
-			case <-ctx.Done():
-				return
-			case localCh <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
-			}
-		}
-	}()
-
 	for {
+		p := make([]byte, common.MaxPacketSize)
+		remoteAddr, n, err := tcpConn.ReadPacket(p)
+		if err != nil {
+			fmt.Println("datachannel read_packet_from_tcpconn tcpConn.ReadPacket error", err)
+			common.SendError(ctx, err_chan, err)
+			return
+		}
+		common.Debug("datachannel read_packet_from_tcpconn tcpConn.ReadPacket", n, "packet.Addr:", remoteAddr)
+
 		select {
 		case <-ctx.Done():
 			return
-		case packet := <-localCh:
-			select {
-			case <-ctx.Done():
-				return
-			case inboundChan <- packet:
-			}
+		case inboundChan <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
 		}
 	}
 }
@@ -420,119 +434,145 @@ func (cc *ControlChannel) write_packet_to_tcpconn(ctx context.Context, tcpConn *
 				common.SendError(ctx, err_chan, err)
 				return
 			}
-			fmt.Println("datachannel write_packet_to_tcpconn tcpConn.WritePacket success", n, "packet.Addr:", packet.Addr)
+			common.Debug("datachannel write_packet_to_tcpconn tcpConn.WritePacket success", n, "packet.Addr:", packet.Addr)
 		}
 	}
 }
 
-func (cc *ControlChannel) forward_udp_inbound(ctx context.Context, targetLocalAddr *net.UDPAddr, network string, err_chan chan error) {
+func (cc *ControlChannel) forward_udp_inbound(ctx context.Context, targetLocalAddr *net.UDPAddr, network string) {
 	defer func() {
 		fmt.Println("datachannel forward_udp_inbound end")
+		cc.closeAllUdpSessions()
 	}()
-
-	var err error
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case inboundPacket := <-cc.inboundPacketChan:
-			rAddrStr := inboundPacket.Addr.String()
+			key := inboundPacket.Addr.String()
 
-			cc.udpConnMapMutex.Lock()
-
-			udpConn, ok := cc.udpConnMap[rAddrStr]
-
-			if !ok {
-				fmt.Println("datachannel forward_udp_inbound udpConn not exist, create new udpConn, rAddrStr:", rAddrStr)
-				var randAddr *net.UDPAddr
-				randAddr, err = net.ResolveUDPAddr(network, "") // 随机端口
-				if err != nil {
-					fmt.Println("datachannel forward_udp_inbound resolve udp addr error", err)
-					common.SendError(ctx, err_chan, err)
-					return
-				}
-				udpConn, err = net.ListenUDP(network, randAddr)
-				if err != nil {
-					fmt.Println("datachannel forward_udp_inbound ListenUDP fail", err)
-					common.SendError(ctx, err_chan, err)
-					return
-				}
-				fmt.Println("datachannel forward_udp_inbound ListenUDP LocalAddr", udpConn.LocalAddr())
-
-				cc.udpConnMap[rAddrStr] = udpConn
-
-				go cc.forward_udp_outbound(ctx, udpConn, cc.outboundPacketChan, inboundPacket.Addr, targetLocalAddr)
+			sess := cc.getOrCreateUdpSession(ctx, key, inboundPacket.Addr, network, targetLocalAddr)
+			if sess == nil {
+				continue
 			}
+			sess.touch()
 
-			cc.udpConnMapMutex.Unlock()
-
-			n, err := udpConn.WriteToUDP(inboundPacket.Payload, targetLocalAddr)
+			// 单个包发不出去只影响这一个来源，绝不能 return：
+			// 这个循环是所有 udp 入方向流量的唯一出口，退出即全局黑洞。
+			n, err := sess.conn.WriteToUDP(inboundPacket.Payload, targetLocalAddr)
 			if err != nil {
 				fmt.Println("datachannel forward_udp_inbound udpConn.WriteToUDP error", err)
-				common.SendError(ctx, err_chan, err)
-				return
+				cc.removeUdpSession(key, sess)
+				continue
 			}
-			fmt.Println("datachannel forward_udp_inbound udpConn.WriteToUDP success", n, "inboundPacket.Addr:", inboundPacket.Addr)
+			common.Debug("datachannel forward_udp_inbound udpConn.WriteToUDP success", n, "inboundPacket.Addr:", inboundPacket.Addr)
 		}
 	}
 }
 
-func (cc *ControlChannel) forward_udp_outbound(ctx context.Context, udpConn *net.UDPConn, outboundPacketChan chan *common.UdpPacket, remoteAddr *common.Address, targetLocalAddr *net.UDPAddr) {
-	fmt.Println("datachannel forward_udp_outbound start, remoteAddr:", remoteAddr.String(), "localAddr:", targetLocalAddr.String())
+func (cc *ControlChannel) getOrCreateUdpSession(ctx context.Context, key string, remoteAddr *common.Address, network string, targetLocalAddr *net.UDPAddr) *udpSession {
+	cc.udpConnMapMutex.Lock()
+	defer cc.udpConnMapMutex.Unlock()
+
+	if sess, ok := cc.udpConnMap[key]; ok {
+		return sess
+	}
+
+	if len(cc.udpConnMap) >= udpSessionMax {
+		fmt.Println("datachannel forward_udp_inbound udp 会话数已达上限，丢弃数据包", key)
+		return nil
+	}
+
+	fmt.Println("datachannel forward_udp_inbound udpConn not exist, create new udpConn, rAddrStr:", key)
+	udpConn, err := net.ListenUDP(network, nil) // 随机端口
+	if err != nil {
+		fmt.Println("datachannel forward_udp_inbound ListenUDP fail", err)
+		return nil
+	}
+	fmt.Println("datachannel forward_udp_inbound ListenUDP LocalAddr", udpConn.LocalAddr())
+
+	sess := &udpSession{conn: udpConn}
+	sess.touch()
+	cc.udpConnMap[key] = sess
+
+	go cc.forward_udp_outbound(ctx, sess, key, remoteAddr, targetLocalAddr)
+
+	return sess
+}
+
+// removeUdpSession 摘除并关闭会话。
+// 比对指针是必需的：同一个来源地址可能已经建了新会话，
+// 只按 key 删会把新会话误删掉。
+func (cc *ControlChannel) removeUdpSession(key string, sess *udpSession) {
+	cc.udpConnMapMutex.Lock()
+	if cur, ok := cc.udpConnMap[key]; ok && cur == sess {
+		delete(cc.udpConnMap, key)
+	}
+	cc.udpConnMapMutex.Unlock()
+
+	if err := sess.conn.Close(); err != nil {
+		common.Debug("datachannel removeUdpSession Close error", err)
+	}
+}
+
+func (cc *ControlChannel) closeAllUdpSessions() {
+	cc.udpConnMapMutex.Lock()
+	list := make([]*udpSession, 0, len(cc.udpConnMap))
+	for key, sess := range cc.udpConnMap {
+		list = append(list, sess)
+		delete(cc.udpConnMap, key)
+	}
+	cc.udpConnMapMutex.Unlock()
+
+	for _, sess := range list {
+		sess.conn.Close()
+	}
+}
+
+func (cc *ControlChannel) forward_udp_outbound(ctx context.Context, sess *udpSession, key string, remoteAddr *common.Address, targetLocalAddr *net.UDPAddr) {
+	fmt.Println("datachannel forward_udp_outbound start, remoteAddr:", key, "localAddr:", targetLocalAddr.String())
 
 	defer func() {
-		fmt.Println("datachannel forward_udp_outbound end, start cleanup udpConn, remoteAddr:", remoteAddr.String(), "localAddr:", targetLocalAddr.String())
-		// cleanup udpConn
-		err := udpConn.Close()
-		if err != nil {
-			fmt.Println("datachannel forward_udp_outbound end udpConn.Close error", err)
-		}
-		cc.udpConnMapMutex.Lock()
-		delete(cc.udpConnMap, remoteAddr.String())
-		cc.udpConnMapMutex.Unlock()
-	}()
-
-	localCh := make(chan *common.UdpPacket, 32)
-
-	go func() {
-		defer func() {
-			fmt.Println("datachannel forward_udp_outbound udpConn.ReadFromUDP end")
-		}()
-
-		for {
-			p := make([]byte, 8192)
-			n, addr, err := udpConn.ReadFromUDP(p)
-			if err != nil {
-				fmt.Println("datachannel forward_udp_outbound clientUDPConn.ReadFrom error", err)
-				return
-			}
-
-			fmt.Println("datachannel forward_udp_outbound udpConn.ReadFromUDP success", n, "from:", addr)
-
-			if addr.String() != targetLocalAddr.String() {
-				fmt.Println("datachannel forward_udp_outbound addr not equal, packet.Addr", addr.String(), "expect:", targetLocalAddr)
-				continue
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case localCh <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
-			}
-		}
+		fmt.Println("datachannel forward_udp_outbound end, start cleanup udpConn, remoteAddr:", key)
+		cc.removeUdpSession(key, sess)
 	}()
 
 	for {
+		// 读超时兼作空闲回收的计时器：到点后再看这个会话是不是真的没流量了。
+		if err := sess.conn.SetReadDeadline(time.Now().Add(udpSessionIdleTimeout)); err != nil {
+			return
+		}
+
+		p := make([]byte, common.MaxPacketSize)
+		n, addr, err := sess.conn.ReadFromUDP(p)
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				// 入方向还在用这个会话就接着等，否则回收掉
+				if sess.idleFor() < udpSessionIdleTimeout {
+					continue
+				}
+				fmt.Println("datachannel forward_udp_outbound udp 会话空闲超时，回收", key)
+				return
+			}
+			common.Debug("datachannel forward_udp_outbound clientUDPConn.ReadFrom error", err)
+			return
+		}
+
+		sess.touch()
+
+		common.Debug("datachannel forward_udp_outbound udpConn.ReadFromUDP success", n, "from:", addr)
+
+		if addr.String() != targetLocalAddr.String() {
+			common.Debug("datachannel forward_udp_outbound addr not equal, packet.Addr", addr.String(), "expect:", targetLocalAddr)
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case packet := <-localCh:
-			select {
-			case <-ctx.Done():
-				return
-			case outboundPacketChan <- packet:
-			}
+		case cc.outboundPacketChan <- &common.UdpPacket{Payload: p[:n], Addr: remoteAddr}:
 		}
 	}
 }

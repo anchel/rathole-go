@@ -104,11 +104,16 @@ func (client *Client) hotUpdate(newConfig *config.Config) {
 
 	newServices := make([]string, 0, 6)
 	delServices := make([]string, 0, 6)
+	changedServices := make([]string, 0, 6)
 
-	for svcName := range clientConfig.Services {
-		_, ok := client.Config.Services[svcName]
+	for svcName, newSvc := range clientConfig.Services {
+		oldSvc, ok := client.Config.Services[svcName]
 		if !ok {
 			newServices = append(newServices, svcName)
+		} else if oldSvc != newSvc {
+			// 名字没变但 token/local_addr/type 改了。
+			// ControlChannel 持有的是创建时那份配置的拷贝，不重建的话改动到重启才生效。
+			changedServices = append(changedServices, svcName)
 		}
 	}
 
@@ -121,6 +126,7 @@ func (client *Client) hotUpdate(newConfig *config.Config) {
 
 	fmt.Println("client hotUpdate newServices", newServices)
 	fmt.Println("client hotUpdate delServices", delServices)
+	fmt.Println("client hotUpdate changedServices", changedServices)
 
 	for _, svcName := range delServices {
 		findCC, ok := client.controlChannelMap[svcName]
@@ -135,9 +141,11 @@ func (client *Client) hotUpdate(newConfig *config.Config) {
 
 	client.Config.Services = clientConfig.Services // 后面创建新的cc，依赖这一步的赋值
 
-	if len(newServices) > 0 {
+	// 配置变更的服务直接重建，run_new_controlchannel 会关掉同名的旧通道
+	restartServices := append(newServices, changedServices...)
+	if len(restartServices) > 0 {
 		go func() {
-			for _, svcName := range newServices {
+			for _, svcName := range restartServices {
 				select {
 				case <-client.ctx.Done():
 					return
